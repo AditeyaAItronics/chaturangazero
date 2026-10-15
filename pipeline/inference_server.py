@@ -29,8 +29,8 @@ class BatchedEvaluator:
     Can evaluate a batch of states in a single forward pass.
     """
     def __init__(self, net: torch.nn.Module, device: str = 'cuda', amp: bool = True):
-        self.net = net
         self.device = torch.device(device if isinstance(device, str) else device)
+        self.net = net.to(self.device)
         self.amp = amp and (self.device.type == 'cuda')
         self.net.eval()
 
@@ -274,8 +274,21 @@ def run_batched_self_play(
                 elif winner == -1:
                     stats['p2_wins'] += 1
 
-                reason = getattr(slot.state, 'terminal_reason', 'terminal')
+                reason = getattr(slot.state, 'terminal_reason', None)
+                if reason is None:
+                    if hasattr(slot.state, '_check_win'):
+                        reason = 'board_full' if slot.state.ply_count >= 42 else 'four_in_a_row'
+                    else:
+                        from pipeline.selfplay import _classify_terminal
+                        reason = _classify_terminal(slot.state, z)
                 stats['terminal_reasons'][reason] = stats['terminal_reasons'].get(reason, 0) + 1
+
+                step_interval = max(10, total_games // 4)
+                if games_completed % step_interval == 0 or games_completed == total_games:
+                    cur_elapsed = time.time() - start_time
+                    cur_speed = games_completed / max(cur_elapsed, 1e-5)
+                    cur_mean_len = float(np.mean(stats['game_lengths'])) if stats['game_lengths'] else 0.0
+                    print(f"  [Self-play] {games_completed}/{total_games} games completed ({cur_speed:.2f} games/s, avg {cur_mean_len:.1f} plies)", flush=True)
 
                 # Flush game positions to replay buffer
                 if buffer is not None:
@@ -292,10 +305,12 @@ def run_batched_self_play(
                             if hasattr(slot.state, 'mirror_action_permutation'):
                                 perm = slot.state.mirror_action_permutation()
                                 mir_s = np.flip(s_enc, axis=2).copy()
-                                mir_pi = np.zeros_like(pi_dist)
-                                for a_idx in range(len(pi_dist)):
-                                    if pi_dist[a_idx] > 0:
-                                        mir_pi[perm[a_idx]] = pi_dist[a_idx]
+                                mir_pi = pi_dist[perm].copy()
+                                buffer.add(mir_s, mir_pi, target_v)
+                            elif hasattr(slot.state, 'mirror'):
+                                _, perm = slot.state.mirror()
+                                mir_s = np.flip(s_enc, axis=2).copy()
+                                mir_pi = pi_dist[perm].copy()
                                 buffer.add(mir_s, mir_pi, target_v)
                             else:
                                 mir_s = np.flip(s_enc, axis=2).copy()

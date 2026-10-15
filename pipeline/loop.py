@@ -10,6 +10,7 @@ import json
 import yaml
 import numpy as np
 import torch
+import copy
 from typing import Optional
 from pathlib import Path
 
@@ -141,7 +142,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     
     for iteration in range(start_iteration, n_iterations):
         iter_start = time.time()
-        print(f"\n--- Iteration {iteration+1}/{n_iterations} ---")
+        print(f"\n{'='*40}\n>>> Iteration {iteration+1}/{n_iterations} <<<\n{'='*40}", flush=True)
         
         # 1. Self-play
         parallel_games = config['loop'].get('parallel_games', 1)
@@ -149,7 +150,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         mirror_augment = config['train'].get('mirror_augment', True)
 
         if parallel_games > 1:
-            print(f"Batched self-play: {games_per_iter} games, {parallel_games} concurrent, {n_sims} sims/move (AMP={amp})...")
+            print(f"Batched self-play: {games_per_iter} games, {parallel_games} concurrent, {n_sims} sims/move (AMP={amp})...", flush=True)
             sp_stats = run_batched_self_play(
                 net=net,
                 state_cls=create_state,
@@ -169,9 +170,9 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             avg_plies = sp_stats['mean_length']
             terminal_stats = sp_stats['terminal_reasons']
             cap_rate = terminal_stats.get('move_cap', 0) / max(sp_stats['games'], 1)
-            print(f"  Speed: {sp_stats['games_per_second']:.2f} games/sec ({sp_stats['elapsed_seconds']:.1f}s)")
+            print(f"  Self-play finished: {sp_stats['p1_wins']}W-{sp_stats['draws']}D-{sp_stats['p2_wins']}L in {sp_stats['elapsed_seconds']:.1f}s ({sp_stats['games_per_second']:.2f} games/s)", flush=True)
         else:
-            print(f"Sequential self-play: {games_per_iter} games, {n_sims} sims/move...")
+            print(f"Sequential self-play: {games_per_iter} games, {n_sims} sims/move...", flush=True)
             evaluate = create_evaluator(net, device=device, action_size=action_size)
             
             games = run_self_play_batch(
@@ -207,13 +208,11 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             avg_plies = total_plies / len(games)
             cap_rate = terminal_stats.get('move_cap', 0) / len(games)
         
-        print(f"  Buffer: {len(buffer)} positions")
-        print(f"  Avg game length: {avg_plies:.1f} plies")
-        print(f"  Terminal reasons: {terminal_stats}")
-        print(f"  Cap rate: {cap_rate:.1%}")
+        print(f"  Buffer: {len(buffer):,} positions | Avg game length: {avg_plies:.1f} plies | Cap rate: {cap_rate:.1%}", flush=True)
+        print(f"  Terminal reasons: {terminal_stats}", flush=True)
         
         # 2. Training
-        print(f"Training: {steps_per_iter} steps...")
+        print(f"Training: {steps_per_iter} steps (batch_size={batch_size})...", flush=True)
         train_stats = trainer.train_epoch(
             buffer=buffer,
             steps=steps_per_iter,
@@ -221,9 +220,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         )
         
         if train_stats:
-            print(f"  Policy loss: {train_stats['mean_policy_loss']:.4f}")
-            print(f"  Value loss:  {train_stats['mean_value_loss']:.4f}")
-            print(f"  Entropy:     {train_stats['mean_entropy']:.4f}")
+            print(f"  Loss summary: Policy={train_stats['mean_policy_loss']:.4f} | Value={train_stats['mean_value_loss']:.4f} | Entropy={train_stats['mean_entropy']:.4f} | LR={trainer.optimizer.param_groups[0]['lr']:.2e}", flush=True)
         
         # Step LR scheduler
         trainer.step_scheduler()
@@ -235,24 +232,20 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             'avg_plies': avg_plies,
             'cap_rate': cap_rate,
         })
+        print(f"  Saved checkpoint to {ckpt_path}", flush=True)
         
         # Save buffer periodically
         if (iteration + 1) % config.get('cloud', {}).get('buffer_snapshot_every', 10) == 0:
-            buffer.save(os.path.join(output_dir, 'buffer.npz'))
+            buf_path = os.path.join(output_dir, 'buffer.npz')
+            buffer.save(buf_path)
+            print(f"  Snapshot saved to {buf_path}", flush=True)
         
         # 4. Arena gating
         if (iteration + 1) % arena_every == 0 and best_net_path:
-            print(f"Arena: {arena_games} games...")
+            print(f"Arena Gating: {arena_games} games vs best incumbent...", flush=True)
             
             # Load best network
-            best_net = type(net)(
-                input_planes=config['net']['input_planes'],
-                board_h=board_size[0],
-                board_w=board_size[1],
-                action_size=action_size,
-                n_blocks=config['net']['blocks'],
-                channels=config['net']['channels'],
-            )
+            best_net = copy.deepcopy(net)
             best_checkpoint = torch.load(best_net_path, map_location=device, weights_only=False)
             best_net.load_state_dict(best_checkpoint['model_state_dict'])
             best_net.to(device)
@@ -279,8 +272,8 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
                 action_size=action_size,
             )
             
-            print(f"  Win rate: {arena_stats['p1_win_rate']:.1%} "
-                  f"({'PROMOTED' if promoted else 'rejected'})")
+            status_str = "PROMOTED (New best!)" if promoted else "REJECTED (Incumbent retained)"
+            print(f"  Arena result: Challenger {arena_stats['p1_wins']}W-{arena_stats['draws']}D-{arena_stats['p2_wins']}L (Score: {arena_stats['p1_win_rate']:.1%}) -> {status_str}", flush=True)
             
             if promoted:
                 trainer.save_checkpoint(best_net_path, iteration=iteration)
@@ -300,10 +293,11 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         metrics_log.append(metrics)
         
         # Save metrics
-        with open(os.path.join(output_dir, 'metrics.json'), 'w') as f:
+        metrics_path = os.path.join(output_dir, 'metrics.json')
+        with open(metrics_path, 'w') as f:
             json.dump(metrics_log, f, indent=2)
         
-        print(f"  Iteration time: {iter_elapsed:.1f}s")
+        print(f"  Iteration completed in {iter_elapsed:.1f}s. Metrics logged to {metrics_path}", flush=True)
     
     print(f"\n{'='*60}")
     print("Training complete!")

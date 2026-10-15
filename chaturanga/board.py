@@ -224,3 +224,8 @@ class State:
         """Return (mirrored_state, action_index_permutation) for augmentation."""
         from .encoding import mirror_state, MIRROR_PERM
         return mirror_state(self), MIRROR_PERM
+    
+    def mirror_action_permutation(self) -> 'np.ndarray':
+        """Return the (4096,) action permutation array for left-right mirroring."""
+        from .encoding import MIRROR_PERM
+        return MIRROR_PERM

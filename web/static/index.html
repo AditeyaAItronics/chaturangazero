@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ChaturangaZero & Connect-4 Arena</title>
+  <meta name="description" content="Minimalist, modern arena to play Chaturanga (Ashtapada) and Connect-4 against AlphaZero models, Alpha-Beta baselines, or humans.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand-badge">
+          <span class="brand-dot"></span>
+          <span class="brand-title">ChaturangaZero</span>
+          <span class="brand-sub">Arena v1.0</span>
+        </div>
+      </div>
+
+      <!-- Game Selector Tabs -->
+      <nav class="game-tabs" id="game-tabs">
+        <button class="tab-btn active" id="tab-chaturanga" data-game="chaturanga">
+          <span class="tab-icon">♟️</span>
+          <span class="tab-label">Chaturanga (8×8)</span>
+        </button>
+        <button class="tab-btn" id="tab-connect4" data-game="connect4">
+          <span class="tab-icon">🔴</span>
+          <span class="tab-label">Connect-4 (6×7)</span>
+        </button>
+      </nav>
+
+      <div class="header-right">
+        <button class="btn btn-secondary" id="btn-flip-board" title="Flip Board Perspective">
+          🔄 Flip View
+        </button>
+        <button class="btn btn-primary" id="btn-new-game">
+          ✨ New Game
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="main-layout">
+      <!-- Left Column: The Board and Game Controls -->
+      <section class="board-section">
+        <!-- Opponent Status Bar -->
+        <div class="player-bar top-player" id="player-p2-bar">
+          <div class="player-info">
+            <span class="player-avatar" id="p2-avatar">♚</span>
+            <div>
+              <div class="player-header-line">
+                <span class="player-name" id="p2-display-name">Black (AlphaZero)</span>
+                <span class="thinking-badge" id="p2-thinking-badge" style="display: none;">
+                  <span class="pulse-ring"></span>
+                  <span class="badge-text">Calculating...</span>
+                </span>
+              </div>
+              <div class="player-sub" id="p2-model-badge">Model: az_latest</div>
+            </div>
+          </div>
+          <div class="captured-box" id="p2-captured-box"></div>
+          <div class="material-score" id="p2-material-score">Score: 0.0</div>
+        </div>
+
+        <!-- Board Wrapper -->
+        <div class="board-wrapper">
+          <!-- Floating Thinking Banner -->
+          <div class="global-thinking-indicator" id="global-thinking-indicator" style="display: none;">
+            <div class="thinking-spinner"></div>
+            <span id="global-thinking-text">AlphaZero is thinking (200 sims)...</span>
+          </div>
+
+          <!-- Chaturanga Board Container -->
+          <div class="chaturanga-board-container" id="chaturanga-container">
+            <div class="board-coords coords-rank" id="coords-ranks"></div>
+            <div class="board-grid chaturanga-grid" id="chaturanga-board"></div>
+            <div class="board-coords coords-file" id="coords-files"></div>
+          </div>
+
+          <!-- Connect-4 Board Container (Hidden initially if chaturanga) -->
+          <div class="connect4-board-container" id="connect4-container" style="display: none;">
+            <div class="c4-column-pickers" id="c4-pickers"></div>
+            <div class="c4-board-frame">
+              <div class="c4-grid" id="connect4-board"></div>
+            </div>
+          </div>
+
+          <!-- Game Over Modal Overlay -->
+          <div class="game-over-overlay" id="game-over-overlay">
+            <div class="game-over-card">
+              <div class="game-over-icon" id="game-over-icon">🏆</div>
+              <h2 class="game-over-title" id="game-over-title">Game Over</h2>
+              <p class="game-over-desc" id="game-over-desc">White won by Raja capture.</p>
+              <div class="game-over-actions">
+                <button class="btn btn-primary" id="btn-modal-restart">Play Again</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Player Status Bar -->
+        <div class="player-bar bottom-player" id="player-p1-bar">
+          <div class="player-info">
+            <span class="player-avatar" id="p1-avatar">♔</span>
+            <div>
+              <div class="player-header-line">
+                <span class="player-name" id="p1-display-name">White (Human)</span>
+                <span class="thinking-badge" id="p1-thinking-badge" style="display: none;">
+                  <span class="pulse-ring"></span>
+                  <span class="badge-text">Calculating...</span>
+                </span>
+              </div>
+              <div class="player-sub" id="p1-model-badge">Player: Human</div>
+            </div>
+          </div>
+          <div class="captured-box" id="p1-captured-box"></div>
+          <div class="material-score" id="p1-material-score">Score: 0.0</div>
+        </div>
+      </section>
+
+      <!-- Right Column: Matchup Config, AI Thoughts, & History -->
+      <aside class="sidebar-section">
+        <!-- Matchup Config Card -->
+        <div class="panel-card matchup-card">
+          <h3 class="panel-title">Player Matchup</h3>
+          <div class="matchup-selectors">
+            <!-- Player 1 Select -->
+            <div class="selector-group">
+              <label for="select-p1" class="selector-label">
+                <span class="piece-indicator white-indicator"></span> Player 1 (White / Red)
+              </label>
+              <select id="select-p1" class="custom-select"></select>
+            </div>
+
+            <!-- VS Divider -->
+            <div class="vs-divider">
+              <span class="vs-line"></span>
+              <span class="vs-badge">VS</span>
+              <span class="vs-line"></span>
+            </div>
+
+            <!-- Player 2 Select -->
+            <div class="selector-group">
+              <label for="select-p2" class="selector-label">
+                <span class="piece-indicator black-indicator"></span> Player 2 (Black / Yellow)
+              </label>
+              <select id="select-p2" class="custom-select"></select>
+            </div>
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="matchup-actions">
+            <button class="btn btn-accent" id="btn-ai-step">
+              ⚡ Trigger AI Move
+            </button>
+            <button class="btn btn-secondary" id="btn-autoplay">
+              ▶ Auto-Play: OFF
+            </button>
+            <button class="btn btn-outline" id="btn-undo">
+              ↩ Undo Move
+            </button>
+          </div>
+
+          <!-- Auto-Play Speed & Delay Slider -->
+          <div class="speed-control-box">
+            <div class="speed-header">
+              <label for="speed-slider" class="speed-label">
+                <span class="speed-icon">⏱</span>
+                <span>Auto-Play Speed Delay</span>
+              </label>
+              <span class="speed-badge" id="speed-display">0.60s</span>
+            </div>
+            <div class="slider-wrapper">
+              <span class="slider-limit">Fast (0.1s)</span>
+              <input type="range" id="speed-slider" min="100" max="2500" step="50" value="600" class="speed-range-slider" aria-label="Auto-play delay slider">
+              <span class="slider-limit">Slow (2.5s)</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- AI Insights & Value Evaluation Card -->
+        <div class="panel-card ai-insights-card" id="ai-insights-panel">
+          <h3 class="panel-title">AI Evaluation & MCTS Analysis</h3>
+          <div class="eval-bar-container">
+            <div class="eval-bar-label">
+              <span>White / Red</span>
+              <span id="eval-value-text">0.00</span>
+              <span>Black / Yellow</span>
+            </div>
+            <div class="eval-bar-track">
+              <div class="eval-bar-fill" id="eval-bar-fill" style="width: 50%;"></div>
+            </div>
+          </div>
+
+          <div class="mcts-candidates" id="mcts-candidates-box">
+            <div class="candidate-header">Top MCTS Branch Visits:</div>
+            <div class="candidates-list" id="candidates-list">
+              <div class="empty-state">Make a move or trigger AI to inspect search tree.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Move History Card -->
+        <div class="panel-card history-card">
+          <div class="history-header">
+            <h3 class="panel-title">Move History</h3>
+            <span class="ply-counter" id="ply-counter">Ply: 0</span>
+          </div>
+          <div class="history-list" id="history-list"></div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

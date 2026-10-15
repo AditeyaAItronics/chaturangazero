@@ -160,6 +160,9 @@ class Trainer:
             
             for k, v in stats.items():
                 epoch_stats[k].append(v)
+            
+            if (step + 1) % max(100, steps // 4) == 0 or (step + 1) == steps:
+                print(f"  [Train] Step {step+1}/{steps} | ploss={stats['policy_loss']:.4f} | vloss={stats['value_loss']:.4f} | ent={stats['entropy']:.4f}", flush=True)
         
         elapsed = time.time() - start_time
         

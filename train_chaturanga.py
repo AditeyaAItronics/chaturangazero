@@ -24,6 +24,10 @@ if __name__ == '__main__':
                        help='Output directory for checkpoints and logs')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
+    parser.add_argument('--iterations', type=int, default=None,
+                       help='Override number of iterations')
+    parser.add_argument('--games', type=int, default=None,
+                       help='Override games per iteration')
     
     args = parser.parse_args()
     
@@ -31,6 +35,10 @@ if __name__ == '__main__':
     print("=" * 50)
     
     config = load_config(args.config)
+    if args.iterations is not None:
+        config['loop']['iterations'] = args.iterations
+    if args.games is not None:
+        config['loop']['games_per_iter'] = args.games
     
     # Print key config
     print(f"Config: {args.config}")

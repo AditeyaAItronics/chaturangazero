@@ -111,10 +111,10 @@ def arena(
         
         results.append(result)
         
-        if verbose and (game_idx + 1) % 10 == 0:
-            print(f"  Game {game_idx+1}/{n_games}: "
-                  f"P1 {p1_wins}-{draws}-{p2_wins} P2 "
-                  f"(win rate: {p1_wins/(game_idx+1):.1%})")
+        if verbose and ((game_idx + 1) % max(10, n_games // 4) == 0 or (game_idx + 1) == n_games):
+            print(f"  [Arena] Game {game_idx+1}/{n_games}: "
+                  f"P1 {p1_wins}W - {draws}D - {p2_wins}L P2 "
+                  f"(score: {(p1_wins + 0.5 * draws)/(game_idx+1):.1%})", flush=True)
     
     total = n_games
     return {
@@ -133,6 +133,7 @@ def gate_model(
     n_games: int = 60,
     win_threshold: float = 0.55,
     action_size: int = 4096,
+    verbose: bool = True,
 ) -> tuple[bool, dict]:
     """
     Arena gating: does the challenger beat the incumbent?
@@ -140,6 +141,6 @@ def gate_model(
     Returns:
         (promoted, stats) — True if challenger's win rate >= threshold.
     """
-    stats = arena(challenger, incumbent, create_state, n_games, action_size)
+    stats = arena(challenger, incumbent, create_state, n_games, action_size, verbose=verbose)
     promoted = stats['p1_win_rate'] >= win_threshold
     return promoted, stats

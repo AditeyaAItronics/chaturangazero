@@ -1,6 +1,8 @@
 # local.yaml — 3060 development configuration
 # 5 blocks / 64 channels (~500k params)
 
+game: chaturanga
+
 rules:
   castling:          false
   pawn_double_step:  false
