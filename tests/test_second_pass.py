@@ -752,3 +752,32 @@ def test_n10_selfplay_reports_greedy_counts(temp_threshold, all_greedy):
         assert stats['raja_capture_miss_rate_greedy'] == stats['raja_capture_miss_rate']
     else:
         assert stats['raja_capture_chances_greedy'] == 0
+
+
+# --- N14 / N15: web model list is honest about checkpoints ------------------
+
+def test_n15_latest_iteration_comes_from_the_filename(web_client, tmp_path, monkeypatch):
+    import torch
+    web_app, client = web_client
+    run = tmp_path / 'runs' / 'chaturanga'
+    run.mkdir(parents=True)
+    for i in (3, 10):                       # checkpoints 0-2 and 4-9 pruned
+        torch.save({}, run / f'checkpoint_{i:04d}.pt')
+    monkeypatch.setattr(web_app, 'PROJECT_ROOT', str(tmp_path))
+    names = {m['id']: m['name'] for m in client.get('/api/models').get_json()['chaturanga']}
+    assert 'Iter 10' in names['az_latest'], names['az_latest']     # old code: "Iter 1"
+
+
+def test_n14_missing_checkpoint_is_labelled_not_disguised(web_client, tmp_path, monkeypatch):
+    web_app, client = web_client
+    monkeypatch.setattr(web_app, 'PROJECT_ROOT', str(tmp_path))      # no runs/ at all
+    models = {m['id']: m for m in client.get('/api/models').get_json()['chaturanga']}
+    for mid in ('az_latest', 'az_best'):
+        assert models[mid]['available'] is False and 'plays random moves' in models[mid]['name']
+    assert 'available' not in models['random']
+    web_app.current_session.game = 'chaturanga'
+    web_app.current_session.p1_type, web_app.current_session.p2_type = 'az_best', 'human'
+    web_app.current_session.state = State()
+    r = client.post('/api/ai_move')
+    assert r.status_code == 200
+    assert 'played a random move' in r.get_json()['ai_stats']['note']

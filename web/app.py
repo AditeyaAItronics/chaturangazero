@@ -10,7 +10,6 @@ Supports:
 
 import os
 import sys
-import glob
 import time
 import threading
 from functools import wraps
@@ -44,21 +43,37 @@ device = get_device()  # CHATURANGA_DEVICE or auto-detect; --device overrides in
 _MODEL_CACHE = {}
 
 
+def _latest_chaturanga_checkpoint():
+    """(iteration, path) of the newest checkpoint_*.pt, or (None, None)."""
+    from pipeline.resume import list_checkpoints
+    ckpts = list_checkpoints(os.path.join(PROJECT_ROOT, 'runs', 'chaturanga'))
+    return ckpts[-1] if ckpts else (None, None)
+
+
+def _checkpoint_path(game: str, model_id: str):
+    """The checkpoint file an AlphaZero player id refers to, or None if it doesn't exist."""
+    path = None
+    if game == 'chaturanga':
+        if model_id == 'az_best':
+            path = os.path.join(PROJECT_ROOT, 'runs', 'chaturanga', 'best.pt')
+        elif model_id == 'az_latest':
+            path = (_latest_chaturanga_checkpoint()[1]
+                    or os.path.join(PROJECT_ROOT, 'runs', 'chaturanga', 'best.pt'))
+    elif game == 'connect4':
+        if model_id in ('az_final', 'az_latest'):
+            path = os.path.join(PROJECT_ROOT, 'runs', 'connect4', 'final.pt')
+            if not os.path.exists(path):
+                path = os.path.join(PROJECT_ROOT, 'runs', 'connect4', 'phase0_passed.pt')
+        elif model_id == 'az_phase0':
+            path = os.path.join(PROJECT_ROOT, 'runs', 'connect4', 'phase0_passed.pt')
+    return path if path and os.path.exists(path) else None
+
+
 def get_model(game: str, model_id: str):
     """Retrieve or load model and create evaluator."""
     if game == 'chaturanga':
-        checkpoint_path = None
-        if model_id == 'az_best':
-            checkpoint_path = os.path.join(PROJECT_ROOT, 'runs', 'chaturanga', 'best.pt')
-        elif model_id == 'az_latest':
-            # Find latest checkpoint_*.pt
-            ckpts = sorted(glob.glob(os.path.join(PROJECT_ROOT, 'runs', 'chaturanga', 'checkpoint_*.pt')))
-            if ckpts:
-                checkpoint_path = ckpts[-1]
-            else:
-                checkpoint_path = os.path.join(PROJECT_ROOT, 'runs', 'chaturanga', 'best.pt')
-
-        if not checkpoint_path or not os.path.exists(checkpoint_path):
+        checkpoint_path = _checkpoint_path(game, model_id)
+        if checkpoint_path is None:
             return None, None
 
         mtime = os.path.getmtime(checkpoint_path)
@@ -87,15 +102,8 @@ def get_model(game: str, model_id: str):
             return None, None
 
     elif game == 'connect4':
-        checkpoint_path = None
-        if model_id in ('az_final', 'az_latest'):
-            checkpoint_path = os.path.join(PROJECT_ROOT, 'runs', 'connect4', 'final.pt')
-            if not os.path.exists(checkpoint_path):
-                checkpoint_path = os.path.join(PROJECT_ROOT, 'runs', 'connect4', 'phase0_passed.pt')
-        elif model_id == 'az_phase0':
-            checkpoint_path = os.path.join(PROJECT_ROOT, 'runs', 'connect4', 'phase0_passed.pt')
-
-        if not checkpoint_path or not os.path.exists(checkpoint_path):
+        checkpoint_path = _checkpoint_path(game, model_id)
+        if checkpoint_path is None:
             return None, None
 
         mtime = os.path.getmtime(checkpoint_path)
@@ -285,9 +293,9 @@ def serve_static(path):
 
 @app.route('/api/models', methods=['GET'])
 def list_models():
-    # Detect available checkpoints
-    chaturanga_ckpts = sorted(glob.glob(os.path.join(PROJECT_ROOT, 'runs', 'chaturanga', 'checkpoint_*.pt')))
-    latest_chaturanga_iter = len(chaturanga_ckpts) - 1 if chaturanga_ckpts else None
+    # The iteration is read from the newest checkpoint's filename (N15): counting
+    # files is wrong when checkpoints were pruned or only partly pulled
+    latest_chaturanga_iter = _latest_chaturanga_checkpoint()[0]
 
     models_data = {
         'chaturanga': [
@@ -305,6 +313,14 @@ def list_models():
             {'id': 'random', 'name': 'Random Moves', 'type': 'random'},
         ]
     }
+    # Say so when an AlphaZero player has no checkpoint: it then plays random
+    # moves, which must not pass for the trained agent (N14)
+    for game, entries in models_data.items():
+        for entry in entries:
+            if entry['type'] == 'az':
+                entry['available'] = _checkpoint_path(game, entry['id']) is not None
+                if not entry['available']:
+                    entry['name'] += ' (no checkpoint: plays random moves)'
     return jsonify(models_data)
 
 
@@ -433,7 +449,9 @@ def ai_move():
                 'sims': n_sims,
             }
         else:
+            # No checkpoint for this player (N14): play randomly, but say so
             chosen_action = random_player(state, action_size)
+            ai_stats = {'note': f'no checkpoint for {player_type}; played a random move'}
     elif player_type == 'baseline_alphabeta':
         chosen_action = alpha_beta_player(state, depth=3, action_size=action_size)
     elif player_type == 'baseline_greedy':
