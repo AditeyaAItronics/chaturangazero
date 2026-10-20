@@ -9,6 +9,8 @@ Team of 4 · 16 weeks · local RTX 3060 for development + GCP for training
 
 **Changes in v2.1:** clarified that a Raja may step onto a guarded square and the opponent may then capture it **on their turn** — the capture is *played*, not automatic (§2.1). Stalemate-wins is **retained** as originally specified: a player with no legal move wins.
 
+**Changes in v2.2** (from the second code review, `needtofixagain.md` P1–P10): corrected the stalemate geometry (§2.1) and the Gaja orbit count (§2.3); replaced the `undo` property test, which the interface contract doesn't support (§2.3); noted that King-vs-King is unreachable from legal play (§2.1, §2.3); fixed the ply-plane normaliser so tightening the cap doesn't change what the network sees (§2.2, §3.2); added a target replay ratio and a warm-up buffer (§2.4, Part 6); set arena search sims and a statistically meaningful gate (§5 Phase 5, Part 6); made the Elo-curve gate reachable (§5 Phase 5); documented AdamW as the optimiser (§1.2, Part 6); and added an optional relative move-type policy head as an ablation (§3.3). No game rule changed.
+
 ---
 
 ## 0. Decisions locked
@@ -77,7 +79,7 @@ The root visit-count distribution — not the raw policy — becomes both the mo
 **C. Dual-head residual network** —
 - **Policy head** → distribution over 4096 actions
 - **Value head** → scalar in [−1, +1], expected outcome for the side to move
-- **Loss** `ℓ = (z − v)² − πᵀ log p + c‖θ‖²`
+- **Loss** `ℓ = (z − v)² − πᵀ log p + c‖θ‖²`. In practice the regulariser is applied as **decoupled weight decay (AdamW)** on conv/linear weights: an L2 term inside plain Adam is rescaled by Adam's per-parameter step sizes and barely regularises the most-updated weights. `optimizer: adam` keeps the literal loss for comparison.
 
 **The loop.** Self-play → `(position, π, z)` triples → replay buffer → gradient steps → stronger network → stronger self-play. No external data at any point.
 
@@ -189,7 +191,9 @@ Checked **after** each move is applied, from the perspective of the player now t
 
 Order matters. Rule 2 must precede rule 3, or King-vs-King resolves as a loss for whoever happens to be to move.
 
-**On rule 4 — stalemate is a win for the stalemated player.** Under this ruleset "stalemate" and "no legal move" are the same condition, since there is no check and therefore no king-safety filtering: a player is stalemated exactly when every piece they own is completely blocked. Because the Raja may step onto guarded squares and may capture, that requires all eight of its neighbours to be occupied by their **own** pieces, each itself blocked.
+**Rule 2 is unreachable from the start position.** A move never removes the mover's own pieces, and a side reduced to a bare Raja loses under rule 3 the moment it is to move — before the opponent could ever lose its last piece. So King-vs-King, like stalemate, only fires in constructed positions. Keep the ordering test (it is cheap and guards the ladder), but don't expect a non-zero King-vs-King counter.
+
+**On rule 4 — stalemate is a win for the stalemated player.** Under this ruleset "stalemate" and "no legal move" are the same condition, since there is no check and therefore no king-safety filtering: a player is stalemated exactly when every piece they own is completely blocked. Because the Raja may step onto guarded squares and may capture, that requires **every** neighbouring square — 3 in a corner, 5 on an edge, 8 elsewhere — to be occupied by their **own** pieces, each itself blocked. The cheapest construction is a Raja in a corner (e.g. Raja a1 boxed in by its own pieces on a2, b1, b2).
 
 Two things follow.
 
@@ -241,7 +245,9 @@ Adjudication is a **training-only** device. Never use it in arena games or again
 
 **Instrument this from iteration one.** Log the fraction of games ending by cap. Healthy is under 15%. If it climbs above 25% the agent has found the shuffling attractor, and the responses in priority order are: (1) tighten the cap to 200, (2) lower the adjudication margin to 2.0 so more capped games score decisively, (3) raise Dirichlet ε at the root to force exploration out of the loop.
 
-**Ply count is part of the state.** Because adjudication depends on it, the network must be able to see it — hence plane 13 in §3.2. Omitting it makes the value target genuinely unlearnable near the cap.
+**Ply count is part of the state.** Because adjudication depends on it, the network must be able to see it — hence plane 12 in §3.2. Omitting it makes the value target genuinely unlearnable near the cap.
+
+**Tightening the cap must not change what the network sees.** Plane 12 is normalised by a **fixed** 300 (`ply_count / 300`), not by the live cap. If plane 12 were `ply / move_cap`, response (1) above would silently re-scale the input for every existing checkpoint and every position already in the buffer (an old ply 150 would jump from 0.5 to 0.75). The cap in force is a run-level setting recorded in the config; the network learns where the cap is from the data.
 
 ## 2.3 Gap 3: "100% accuracy via unit tests" is not testable as written
 
@@ -254,11 +260,11 @@ Depth 6 is affordable here precisely because there is no legality filtering — 
 
 **2. Freeze the agreed numbers** into `tests/perft_reference.json`. That file becomes ground truth and the regression suite. Any later optimisation of the engine must reproduce it exactly.
 
-**3. Position set — cover the pathologies deliberately.** The 15 positions must include: the start position; a position with a Padati one step from promotion; both a bare-king and a King-vs-King position; a hand-built stalemate position, contrived but mandatory — it is the only test that will ever exercise the `+1` terminal; a position where a Raja's only moves are onto guarded squares, confirming they generate as legal; a position where a Gaja's only moves jump over occupied squares; a position with elephants on all four orbit classes; and an endgame with a lone Ratha.
+**3. Position set — cover the pathologies deliberately.** The 15 positions must include: the start position; a position with a Padati one step from promotion; both a bare-king and a King-vs-King position (the latter constructed — it is unreachable from play, §2.1); a hand-built stalemate position, contrived but mandatory — it is the only test that will ever exercise the `+1` terminal; a position where a Raja's only moves are onto guarded squares, confirming they generate as legal; a position where a Gaja's only moves jump over occupied squares; a position with elephants on all eight orbits (§1.1); and an endgame with a lone Ratha.
 
 **4. Property tests.**
 - `decode(encode(m)) == m` for every legal move in 10,000 random positions
-- `apply` then `undo` restores an identical state hash
+- `apply` never mutates its input state (the §3.4 contract returns a new state; there is no `undo`)
 - `legal_mask` has exactly `len(legal_moves())` bits set
 - **Mirror invariance:** `perft(mirror(s), d) == perft(s, d)` for all test positions and depths — this simultaneously validates the movegen symmetry and the augmentation index permutation of §3.5
 - **Termination:** every one of 10,000 random playouts terminates, and the terminal reason distribution is sane
@@ -340,6 +346,15 @@ For calibration: DeepMind used 44M games for chess on TPU clusters; published sm
 
 Target **300 iterations** and hold the remainder as headroom.
 
+**Replay ratio.** 2,000 steps × 512 = ~1M samples per iteration against ~80k new positions is a replay ratio of ~13 — each new position is trained on 13 times in its first iteration alone, and the very first iteration would train ~13 epochs on a random network's games. Instead, derive the step count from the data:
+
+```
+steps_per_iter = ceil(replay_ratio × new_positions / batch_size)     # replay_ratio ≈ 3
+train only once the buffer holds ≥ min_buffer positions             # min_buffer ≈ 50k
+```
+
+At ~80k new positions per iteration this is ~470 steps (~1 min), which also shortens the iteration. `steps_per_iter` remains as an upper bound.
+
 ### Fallback tiers
 
 Choose your tier at the **Phase 4 gate in Week 8**, from measured throughput — not now.
@@ -394,7 +409,7 @@ Always **canonical orientation**: the board is flipped so the side to move is al
 | --- | --- |
 | 0–5 | Our Padati, Ashva, Gaja, Ratha, Mantri, Raja |
 | 6–11 | Their Padati, Ashva, Gaja, Ratha, Mantri, Raja |
-| 12 | `ply_count / move_cap`, constant-filled — **required**, because adjudication depends on it (§2.2) |
+| 12 | `ply_count / 300` (fixed normaliser, not the live cap), constant-filled — **required**, because adjudication depends on it (§2.2) |
 | 13 | All ones — gives the CNN an explicit board-edge reference against zero padding |
 
 **No castling planes, no en passant plane, no repetition plane, no 50-move plane, no history planes.** With no check and no repetition rule, the position plus side-to-move is a complete Markov state. AlphaZero stacks eight timesteps mainly to make repetition detectable; we have no repetition rule, so history buys nothing. This is a real simplification the chess version does not get to enjoy.
@@ -416,6 +431,10 @@ input  14 × 8 × 8
 ```
 
 **Do not** flatten the trunk into `Linear(8192, 4096)` — that is ~34M parameters in one layer, dwarfing the 2.4M trunk and guaranteeing overfit. The 1×1 convolution above produces the same 4096 outputs from ~8k parameters by reading spatial position as the *from*-square and channel index as the *to*-square. **This is the single most important architectural detail in the plan.**
+
+The implementation assigns the transpose — **channel = from-square, spatial position = to-square** — which is equally valid. Either way each logit is tied to an *absolute* square, so the network cannot share "this is a knight jump" across the board.
+
+**Optional ablation: relative move-type head.** AlphaZero-for-chess indexes the policy as *from-square × move type*. For Chaturanga that is 8 one-step directions (Raja, Mantri, Padati), 8 Ashva jumps, 4 Gaja jumps and 4 × 6 longer Ratha slides = **44 planes × 64 = 2,816 logits**, with no promotion planes because promotion is forced. It is translation-equivariant and typically learns faster. Worth one ablation run in Phase 6; not required.
 
 `local.yaml` uses 5 blocks / 64 channels (~500k params) for development on the 3060.
 
@@ -630,9 +649,12 @@ Four weeks of near-continuous running:
 repeat 300 times:
     generate 1,000 self-play games with the current best net
     train 2,000 gradient steps on the buffer
-    every 5th iteration: arena challenger vs incumbent
-                         promote if win rate ≥ 55% over 60 games
+    every 5th iteration: arena challenger vs incumbent, same sims as self-play
+                         promote if score ≥ 55% over 200 games
+                         (or an SPRT with early stopping)
 ```
+
+**Why 200 games.** At 60 games the standard error of the score is ~6.4 points, so a 55% threshold sits less than one standard error above 50% and an *equal-strength* challenger passes ~20–25% of the time. At 200 games the SE is ~3.5 points. The batched arena makes this cheap. Log the 95% confidence interval next to every gate result.
 
 Keep arena gating even though AlphaZero itself dropped it — at this scale training is noisy, and one bad update can collapse the agent. Gating makes that recoverable.
 
@@ -640,7 +662,7 @@ Log every iteration: policy loss, value loss, **mean game length**, **terminal-r
 
 **Never delete checkpoints** — they are the Elo ladder that becomes the report's headline figure. Sync every one to GCS.
 
-**Gate:** a monotone-ish Elo curve across at least 30 promoted checkpoints.
+**Gate:** a monotone-ish Elo curve across at least 30 checkpoints, rated from a round-robin over **all** iteration checkpoints, not only promoted ones. (With a gate every 5th of 300 iterations there are at most 60 gates, so "30 promotions" would need a ≥ 50% promotion rate — not a realistic target.)
 
 ## Phase 6 — Evaluation · Weeks 14–15 · S2 lead
 
@@ -693,20 +715,24 @@ play:
   adjudicate_margin: 4.0
 
 train:
-  optimizer: adam
+  optimizer: adamw              # decoupled weight decay; "adam" = literal c‖θ‖² loss
+  weight_decay: 1.0e-2
   lr: 2.0e-3
   lr_milestones: [80, 200]      # iterations
   lr_gamma: 0.1
   batch_size: 512
   l2: 1.0e-4
   buffer_size: 1000000          # positions
-  steps_per_iter: 2000
+  steps_per_iter: 2000          # upper bound; actual = ceil(replay_ratio × new positions / batch)
+  replay_ratio: 3.0
+  min_buffer: 50000
   grad_clip: 1.0
   amp_inference: true
   mirror_augment: true          # legal now that castling is gone
 
 arena:
-  games: 60
+  games: 200
+  sims: 100                     # same as mcts.sims
   win_threshold: 0.55
   every_n_iters: 5
 
@@ -763,7 +789,7 @@ seed: 20260829
 - [ ] Full test suite in CI
 
 **Results**
-- [ ] Elo curve across ≥30 promoted checkpoints
+- [ ] Elo curve across ≥30 checkpoints (round-robin over all iteration checkpoints)
 - [ ] Win rates vs all three baselines
 - [ ] Loss curves, policy/value split
 - [ ] Sims-vs-strength ablation
