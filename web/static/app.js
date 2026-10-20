@@ -31,6 +31,10 @@ class ArenaApp {
     this.flipped = false;
     this.autoPlay = false;
     this.autoPlayDelay = 600; // ms delay between moves
+    // Set when an AI move request fails: automatic AI moves stop (no endless
+    // retry loop) until the next human action, new game, undo or Auto-Play toggle.
+    // The "Trigger AI Move" button still works.
+    this.autoAiPaused = false;
     this.autoPlayTimer = null;
     this.isThinking = false;
     this.isRequestPending = false;
@@ -219,6 +223,7 @@ class ArenaApp {
 
   toggleAutoPlay() {
     this.autoPlay = !this.autoPlay;
+    this.autoAiPaused = false;
     if (this.autoPlayTimer) {
       clearTimeout(this.autoPlayTimer);
       this.autoPlayTimer = null;
@@ -235,18 +240,27 @@ class ArenaApp {
     }
   }
 
+  // Should the AI move without being asked? Always when a human is playing
+  // (the AI replies to the human's move, or opens when the human plays Black);
+  // in AI-vs-AI games only while Auto-Play is on.
+  aiMovesAutomatically() {
+    const gs = this.gameState;
+    if (!gs || this.autoAiPaused) return false;
+    return this.autoPlay || gs.p1_type === 'human' || gs.p2_type === 'human';
+  }
+
   checkAutoPlay() {
     if (this.autoPlayTimer) {
       clearTimeout(this.autoPlayTimer);
       this.autoPlayTimer = null;
     }
-    if (!this.autoPlay || !this.gameState || this.gameState.is_terminal || this.isRequestPending) {
+    if (!this.aiMovesAutomatically() || this.gameState.is_terminal || this.isRequestPending) {
       return;
     }
     if (this.gameState.current_player_type !== 'human') {
       this.autoPlayTimer = setTimeout(() => {
         this.autoPlayTimer = null;
-        if (this.autoPlay && !this.gameState?.is_terminal && !this.isRequestPending) {
+        if (this.aiMovesAutomatically() && !this.gameState?.is_terminal && !this.isRequestPending) {
           this.stepAi();
         }
       }, this.autoPlayDelay);
@@ -330,6 +344,7 @@ class ArenaApp {
     this.selectedSq = null;
     this.legalTargets.clear();
     this.lastMove = null;
+    this.autoAiPaused = false;
     this.gameOverOverlay.style.display = 'none';
 
     try {
@@ -395,6 +410,7 @@ class ArenaApp {
         this.gameState = await res.json();
         this.selectedSq = null;
         this.legalTargets.clear();
+        this.autoAiPaused = false;
         this.render();
       } else {
         const errData = await res.json();
@@ -434,11 +450,13 @@ class ArenaApp {
 
         this.render();
       } else {
-        const errData = await res.json();
-        console.warn('AI Move failed:', errData);
+        const errData = await res.json().catch(() => ({}));
+        console.warn('AI Move failed; automatic AI moves paused:', errData);
+        this.autoAiPaused = true;
       }
     } catch (err) {
-      console.error('Error during AI move:', err);
+      console.error('Error during AI move; automatic AI moves paused:', err);
+      this.autoAiPaused = true;
     } finally {
       this.isRequestPending = false;
       this.setThinkingState(false);
@@ -456,6 +474,7 @@ class ArenaApp {
     try {
       const res = await fetch('/api/undo', { method: 'POST' });
       if (res.ok) {
+        this.autoAiPaused = false;
         this.gameState = await res.json();
         this.selectedSq = null;
         this.legalTargets.clear();
