@@ -97,9 +97,14 @@ def test_replay_buffer():
     """Replay buffer should store and sample correctly."""
     buf = ReplayBuffer(max_size=100)
     
-    # Add 50 fake positions
+    # Add 50 positions from random Connect-4 games (real encodings: binary or
+    # constant planes, which is what the compact buffer stores)
+    game_state = Connect4State()
     for i in range(50):
-        state = np.random.randn(3, 6, 7).astype(np.float32)
+        if game_state.is_terminal()[0]:
+            game_state = Connect4State()
+        state = game_state.encode()
+        game_state = game_state.apply(int(np.random.choice(game_state.legal_moves())))
         policy = np.random.dirichlet(np.ones(7)).astype(np.float32)
         value = np.random.uniform(-1, 1)
         buf.add(state, policy, value)

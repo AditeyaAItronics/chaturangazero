@@ -144,6 +144,10 @@ class Connect4State:
             self._hash = (self.board.tobytes(), self._side)
         return self._hash
     
+    def orient_policy(self, policy: np.ndarray) -> np.ndarray:
+        """Canonical policy frame == absolute frame (encode() never flips columns)."""
+        return policy
+
     def mirror(self) -> tuple['Connect4State', np.ndarray]:
         """Left-right mirror (Connect-4 is symmetric)."""
         mirrored_board = np.flip(self.board, axis=1).copy()

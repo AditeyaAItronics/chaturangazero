@@ -225,6 +225,15 @@ class State:
         from .encoding import mirror_state, MIRROR_PERM
         return mirror_state(self), MIRROR_PERM
     
+    def orient_policy(self, policy: 'np.ndarray') -> 'np.ndarray':
+        """
+        Convert a (4096,) policy between the absolute frame (legal_moves, MCTS)
+        and the canonical frame used by encode() and the network. Its own
+        inverse, so it is applied to network output and to training targets alike.
+        """
+        from .encoding import orient_policy
+        return orient_policy(self, policy)
+
     def mirror_action_permutation(self) -> 'np.ndarray':
         """Return the (4096,) action permutation array for left-right mirroring."""
         from .encoding import MIRROR_PERM

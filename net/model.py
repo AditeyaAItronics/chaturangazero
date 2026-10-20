@@ -123,10 +123,13 @@ class DualHeadNet(nn.Module):
             out = block(out)
         
         # Policy head
-        p = F.relu(self.policy_bn(self.policy_conv(out)))
+        p = self.policy_bn(self.policy_conv(out))
         p = p.view(p.size(0), -1)  # Flatten
         if self._policy_needs_fc:
-            p = self.policy_fc(p)
+            p = self.policy_fc(F.relu(p))
+        # Direct-reshape head (Chaturanga): p is already the logits, so no ReLU —
+        # it would clamp them to >= 0 and the network could never push a bad
+        # move below the rest.
         # p is now (B, action_size)
         
         # Apply legal mask: set illegal to -inf BEFORE softmax

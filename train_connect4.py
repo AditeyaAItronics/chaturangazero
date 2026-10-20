@@ -27,6 +27,7 @@ from search.mcts import search, select_action_with_temperature
 from search.baselines import random_player
 from search.arena import arena
 from pipeline.inference_server import run_batched_self_play
+from utils.device import get_device, use_amp, describe_device, add_device_argument
 
 
 def run_phase0(
@@ -38,13 +39,14 @@ def run_phase0(
     parallel_games: int = 32,
     save_models: bool = True,
     early_stop: bool = True,
+    device=None,
 ):
     """
     Run the Phase 0 Connect-4 pipeline proof.
     """
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = get_device(device)
     print(f"Phase 0 — Connect-4 Pipeline Proof")
-    print(f"Device: {device}")
+    print(f"Device: {describe_device(device)}")
     print(f"{'='*50}")
     
     # Create network
@@ -55,7 +57,8 @@ def run_phase0(
     trainer = Trainer(net, lr=2e-3, l2=1e-4, device=device)
     
     # Buffer
-    buffer = ReplayBuffer(max_size=100_000)
+    # Mirror augmentation (column c -> 6 - c) is applied at sample time
+    buffer = ReplayBuffer(max_size=100_000, mirror_perm=np.arange(7)[::-1].copy())
     
     # Output dir
     os.makedirs('runs/connect4', exist_ok=True)
@@ -80,9 +83,8 @@ def run_phase0(
                 dirichlet_eps=0.25,
                 temp_threshold=10,
                 device=device,
-                amp=(device == 'cuda'),
+                amp=use_amp(device),
                 buffer=buffer,
-                mirror_augmentation=True,
             )
             print(f"  Self-play: {sp_stats['p1_wins']}W-{sp_stats['draws']}D-{sp_stats['p2_wins']}L, "
                   f"buffer={len(buffer)}, speed={sp_stats['games_per_second']:.1f} games/s ({sp_stats['elapsed_seconds']:.2f}s)")
@@ -124,12 +126,7 @@ def run_phase0(
                 # Add to buffer
                 for i, (s, pi) in enumerate(zip(states_enc, policies)):
                     v = result if i % 2 == 0 else -result
-                    buffer.add(s, pi, v)
-                    
-                    # Mirror augmentation
-                    mirrored_s = np.flip(s, axis=2).copy()
-                    mirrored_pi = pi[::-1].copy()  # Flip column order
-                    buffer.add(mirrored_s, mirrored_pi, v)
+                    buffer.add(s, pi, v)  # mirrored copies are drawn at sample time
                 
                 game_results.append(result)
             
@@ -236,6 +233,7 @@ if __name__ == '__main__':
                         help='Do not save model checkpoints')
     parser.add_argument('--no-early-stop', action='store_true',
                         help='Continue training for all iterations without early stopping')
+    add_device_argument(parser)
     args = parser.parse_args()
     
     run_phase0(
@@ -246,4 +244,5 @@ if __name__ == '__main__':
         parallel_games=args.parallel_games,
         save_models=not args.no_save,
         early_stop=not args.no_early_stop,
+        device=args.device,
     )

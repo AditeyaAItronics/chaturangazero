@@ -19,6 +19,7 @@ from connect4.game import Connect4State, ROWS, COLS
 from net.model import create_connect4_net
 from net.train import create_evaluator
 from search.mcts import search, select_action_with_temperature
+from utils.device import get_device, describe_device, add_device_argument
 
 
 def print_board(state: Connect4State):
@@ -46,10 +47,12 @@ def main():
     parser.add_argument("--model", type=str, default=None, help="Path to trained model checkpoint")
     parser.add_argument("--sims", type=int, default=50, help="MCTS simulations per move")
     parser.add_argument("--ai-first", action="store_true", help="AI plays first (X)")
+    add_device_argument(parser)
     args = parser.parse_args()
 
     human_side = -1 if args.ai_first else 1
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device(args.device)
+    print(f"Device: {describe_device(device)}")
 
     # Resolve model path
     model_path = args.model

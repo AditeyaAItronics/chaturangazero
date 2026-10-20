@@ -33,9 +33,10 @@ from connect4.game import Connect4State, ROWS as C4_ROWS, COLS as C4_COLS
 from net.model import create_chaturanga_net, create_connect4_net
 from search.mcts import search
 from search.baselines import random_player, greedy_material_player, alpha_beta_player
+from utils.device import get_device, describe_device, add_device_argument
 
 app = Flask(__name__, static_folder='static')
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = get_device()  # CHATURANGA_DEVICE or auto-detect; --device overrides in __main__
 
 # Model cache: path -> (model, eval_fn)
 _MODEL_CACHE = {}
@@ -77,7 +78,8 @@ def get_model(game: str, model_id: str):
                     logits, v = net(x)
                     probs = F.softmax(logits, dim=-1).cpu().numpy()[0]
                     val = float(v.item())
-                return probs, val
+                # Canonical (network) frame -> absolute (MCTS) frame
+                return state.orient_policy(probs), val
 
             _MODEL_CACHE[cache_key] = (net, evaluate)
             return net, evaluate
@@ -477,8 +479,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Chaturanga & Connect4 Web Server')
     parser.add_argument('--port', type=int, default=5000, help='Port to serve on')
     parser.add_argument('--host', type=str, default='127.0.0.1', help='Host address')
+    add_device_argument(parser)
     args = parser.parse_args()
+    if args.device is not None:
+        device = get_device(args.device)
 
     print(f"Starting Game Server on http://{args.host}:{args.port}")
-    print(f"Inference device: {device}")
+    print(f"Inference device: {describe_device(device)}")
     app.run(host=args.host, port=args.port, debug=False)

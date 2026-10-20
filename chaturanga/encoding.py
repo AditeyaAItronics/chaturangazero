@@ -102,6 +102,38 @@ def mirror_action_permutation() -> np.ndarray:
 MIRROR_PERM = mirror_action_permutation()
 
 
+def canonical_action_permutation() -> np.ndarray:
+    """
+    Action permutation matching the canonical (side-to-move-up) board flip.
+
+    encode_state() flips ranks when Black is to move, so the network sees
+    Black's position from Black's side. Policy vectors must be flipped the
+    same way: rank r -> 7 - r on both from- and to-square (sq ^ 56).
+
+    The permutation is its own inverse, so the same array converts
+    absolute -> canonical and canonical -> absolute.
+    """
+    perm = np.zeros(4096, dtype=np.int32)
+    for action in range(4096):
+        from_sq, to_sq = action // 64, action % 64
+        perm[action] = (from_sq ^ 56) * 64 + (to_sq ^ 56)
+    return perm
+
+
+CANONICAL_PERM = canonical_action_permutation()
+
+
+def orient_policy(state: State, policy: np.ndarray) -> np.ndarray:
+    """
+    Convert a (4096,) policy-shaped array between the absolute frame
+    (State.legal_moves(), MCTS visit counts) and the canonical frame the
+    network reads and writes. Identity for White, rank flip for Black.
+    """
+    if state.side_to_move == BLACK:
+        return policy[CANONICAL_PERM]
+    return policy
+
+
 EMPTY = 0  # re-export for convenience
 
 

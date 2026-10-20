@@ -1,9 +1,15 @@
 """
 Deliberately slow, obviously-correct reference engine for differential testing.
 
-Written independently from the production engine (moves.py).
+Written independently from the production engine (moves.py, terminal.py).
 Uses naive 8x8 iteration, one function per piece, no optimization.
 Written directly from RULES.md.
+
+Only the State container (board array, side to move, ply count) and the
+square/piece constants are shared with production. Move generation, move
+application (including promotion), the terminal ladder and material
+adjudication are all re-implemented here, so differential perft exercises
+every rule rather than only piece movement.
 """
 
 import numpy as np
@@ -12,7 +18,16 @@ from .board import (
     PADATI, ASHVA, GAJA, RATHA, MANTRI, RAJA,
     rank_of, file_of, sq, on_board,
 )
-from .moves import encode_action
+
+# RULES.md values, deliberately restated rather than imported
+REF_MOVE_CAP = 300
+REF_ADJUDICATE_MARGIN = 4.0
+REF_PIECE_VALUES = {RATHA: 5.0, ASHVA: 3.0, GAJA: 1.5, MANTRI: 1.5, PADATI: 1.0}
+
+
+def encode_action(from_sq: int, to_sq: int) -> int:
+    """action = from_square * 64 + to_square (RULES §3.1)."""
+    return from_sq * 64 + to_sq
 
 
 def ref_generate_moves(state: State) -> list[int]:
@@ -168,25 +183,71 @@ def _ref_raja(board, s, side, moves):
                     moves.append(encode_action(s, target))
 
 
-def ref_perft(state: State, depth: int) -> int:
-    """Reference perft — uses ref_generate_moves instead of the production engine."""
-    from .terminal import is_terminal
-    from .moves import apply_move
+def ref_apply_move(state: State, action: int) -> State:
+    """Apply a move: displace any piece on the target, promote a Padati on the last rank."""
+    from_square = action // 64
+    to_square = action % 64
+    board = [int(x) for x in state.board]
+    piece = board[from_square]
+    board[from_square] = EMPTY
+    board[to_square] = piece
     
+    last_rank = 7 if state.side_to_move == WHITE else 0
+    if abs(piece) == PADATI and to_square // 8 == last_rank:
+        board[to_square] = MANTRI if piece > 0 else -MANTRI
+    
+    return State(board=np.array(board, dtype=np.int8),
+                 side_to_move=-state.side_to_move,
+                 ply_count=state.ply_count + 1)
+
+
+def _ref_pieces(board, side) -> list[int]:
+    """Piece types (absolute values) belonging to `side`."""
+    if side == WHITE:
+        return [int(p) for p in board if p > 0]
+    return [int(-p) for p in board if p < 0]
+
+
+def ref_is_terminal(state: State) -> tuple[bool, float]:
+    """Terminal ladder from RULES.md, in order, from the side to move's view."""
+    me = state.side_to_move
+    mine = _ref_pieces(state.board, me)
+    theirs = _ref_pieces(state.board, -me)
+    
+    # 1. Raja captured
+    if RAJA not in mine:
+        return True, -1.0
+    # 2. King vs King
+    if mine == [RAJA] and theirs == [RAJA]:
+        return True, 0.0
+    # 3. Bare king
+    if mine == [RAJA]:
+        return True, -1.0
+    # 4. Stalemate: the player with no legal move WINS
+    if len(ref_generate_moves(state)) == 0:
+        return True, 1.0
+    # 5. Move cap: adjudicate on material
+    if state.ply_count >= REF_MOVE_CAP:
+        diff = (sum(REF_PIECE_VALUES.get(p, 0.0) for p in mine)
+                - sum(REF_PIECE_VALUES.get(p, 0.0) for p in theirs))
+        if diff >= REF_ADJUDICATE_MARGIN:
+            return True, 1.0
+        if diff <= -REF_ADJUDICATE_MARGIN:
+            return True, -1.0
+        return True, 0.0
+    return False, 0.0
+
+
+def ref_perft(state: State, depth: int) -> int:
+    """Reference perft — no production code on the path except the State container."""
     if depth == 0:
         return 1
     
-    done, _ = is_terminal(state)
+    done, _ = ref_is_terminal(state)
     if done:
         return 0
     
-    moves = ref_generate_moves(state)
-    if not moves:
-        return 0
-    
     count = 0
-    for action in moves:
-        child = apply_move(state, action)
-        count += ref_perft(child, depth - 1)
-    
+    for action in ref_generate_moves(state):
+        count += ref_perft(ref_apply_move(state, action), depth - 1)
     return count

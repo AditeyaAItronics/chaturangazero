@@ -12,6 +12,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from pipeline.loop import training_loop, load_config
+from utils.device import add_device_argument
 
 
 if __name__ == '__main__':
@@ -28,6 +29,7 @@ if __name__ == '__main__':
                        help='Override number of iterations')
     parser.add_argument('--games', type=int, default=None,
                        help='Override games per iteration')
+    add_device_argument(parser)
     
     args = parser.parse_args()
     
@@ -49,4 +51,5 @@ if __name__ == '__main__':
     print(f"Output: {args.output}")
     print("=" * 50)
     
-    training_loop(config, output_dir=args.output, resume_from=args.resume)
+    training_loop(config, output_dir=args.output, resume_from=args.resume,
+                  device=args.device)

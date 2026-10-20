@@ -87,9 +87,9 @@ def self_play_game(
             visit_counts, temperature, legal_actions
         )
         
-        # Store training data
+        # Store training data — π in the same canonical frame as the encoding
         states_encoded.append(encoded)
-        policies.append(pi)
+        policies.append(state.orient_policy(pi))
         
         # Subtree reuse
         if reuse_subtree:

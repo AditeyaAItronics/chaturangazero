@@ -156,7 +156,9 @@ def _select_action(node: Node, c_puct: float) -> int:
     a* = argmax_a [ Q(s,a) + c_puct * P(s,a) * sqrt(sum_N) / (1 + N(s,a)) ]
     """
     total_n = node.total_visits
-    sqrt_total = math.sqrt(total_n)
+    # max(.., 1): with 0 visits sqrt(0) would zero the prior term, every score
+    # would tie at 0 and the first visit would always go to legal_actions[0].
+    sqrt_total = math.sqrt(max(total_n, 1.0))
     
     best_score = -float('inf')
     best_action = node.legal_actions[0]

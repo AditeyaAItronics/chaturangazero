@@ -49,6 +49,7 @@ arena:
   games: 40
   win_threshold: 0.55
   every_n_iters: 5
+  opening_plies: 4        # random shared opening per game pair, so argmax players don't replay 2 games
 
 loop:
   games_per_iter: 200
@@ -56,4 +57,5 @@ loop:
   parallel_games: 32
   workers: 4
 
+device: auto        # auto | cpu | cuda | cuda:N  (CLI --device or CHATURANGA_DEVICE override)
 seed: 20260829

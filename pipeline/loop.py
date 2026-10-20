@@ -22,6 +22,7 @@ from search.baselines import random_player
 from search.mcts import search, select_action_with_temperature
 from pipeline.selfplay import run_self_play_batch
 from pipeline.inference_server import run_batched_self_play
+from utils.device import ENV_VAR, get_device, use_amp, describe_device, add_device_argument
 
 
 def load_config(config_path: str) -> dict:
@@ -30,7 +31,8 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = None):
+def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = None,
+                  device=None):
     """
     Main AlphaZero training loop.
     
@@ -38,6 +40,8 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         config: configuration dict (from YAML)
         output_dir: directory for checkpoints and logs
         resume_from: path to checkpoint to resume from
+        device: 'auto', 'cpu', 'cuda', 'cuda:N'; None falls back to CHATURANGA_DEVICE,
+                then config['device'], then auto-detect
     """
     # Setup
     game_type = config.get('game', 'chaturanga')
@@ -45,8 +49,9 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     np.random.seed(seed)
     torch.manual_seed(seed)
     
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Device: {device}")
+    # Precedence: --device flag > CHATURANGA_DEVICE > config 'device:' > auto
+    device = get_device(device or os.environ.get(ENV_VAR) or config.get('device'))
+    print(f"Device: {describe_device(device)}")
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -65,7 +70,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         )
         action_size = config['net']['action_space']
         create_state = Connect4State
-        mirror_perm = None  # Connect-4 mirrors differently
+        mirror_perm = np.arange(action_size)[::-1].copy()  # column c -> 6 - c
         board_size = (6, 7)
     else:
         from chaturanga.board import State
@@ -93,8 +98,10 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         device=device,
     )
     
-    # Create replay buffer
-    buffer = ReplayBuffer(max_size=config['train']['buffer_size'])
+    # Create replay buffer — mirror augmentation is applied at sample time
+    mirror_augment = config['train'].get('mirror_augment', True)
+    buffer = ReplayBuffer(max_size=config['train']['buffer_size'],
+                          mirror_perm=mirror_perm if mirror_augment else None)
     
     # Resume from checkpoint if specified
     start_iteration = 0
@@ -126,8 +133,15 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     arena_every = config['arena']['every_n_iters']
     win_threshold = config['arena']['win_threshold']
     
-    # Training metrics log
+    opening_plies = config['arena'].get('opening_plies', 4)
+    
+    # Training metrics log — on resume, keep the history up to the resume point
     metrics_log = []
+    metrics_path = os.path.join(output_dir, 'metrics.json')
+    if start_iteration > 0 and os.path.exists(metrics_path):
+        with open(metrics_path, 'r') as f:
+            metrics_log = [m for m in json.load(f) if m.get('iteration', -1) < start_iteration]
+        print(f"Loaded {len(metrics_log)} previous metrics entries")
     
     print(f"\n{'='*60}")
     print(f"Starting training: {n_iterations} iterations")
@@ -136,9 +150,19 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     print(f"  Buffer: {config['train']['buffer_size']:,}")
     print(f"{'='*60}\n")
     
-    # Save initial model as the "best"
+    # Incumbent ("best") network: generates self-play data and defends in the arena.
+    # `net` is the challenger that the trainer updates; it only replaces the
+    # incumbent after winning the arena gate.
     best_net_path = os.path.join(output_dir, 'best.pt')
-    trainer.save_checkpoint(best_net_path, iteration=0)
+    best_net = copy.deepcopy(net).to(device)
+    if start_iteration > 0 and os.path.exists(best_net_path):
+        # Resuming: keep the existing incumbent instead of overwriting it
+        best_checkpoint = torch.load(best_net_path, map_location=device, weights_only=False)
+        best_net.load_state_dict(best_checkpoint['model_state_dict'])
+        print(f"Loaded incumbent from {best_net_path}")
+    else:
+        trainer.save_checkpoint(best_net_path, iteration=0)
+    best_net.eval()
     
     for iteration in range(start_iteration, n_iterations):
         iter_start = time.time()
@@ -146,13 +170,12 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         
         # 1. Self-play
         parallel_games = config['loop'].get('parallel_games', 1)
-        amp = config['train'].get('amp_inference', True)
-        mirror_augment = config['train'].get('mirror_augment', True)
+        amp = use_amp(device, config['train'].get('amp_inference', True))
 
         if parallel_games > 1:
             print(f"Batched self-play: {games_per_iter} games, {parallel_games} concurrent, {n_sims} sims/move (AMP={amp})...", flush=True)
             sp_stats = run_batched_self_play(
-                net=net,
+                net=best_net,
                 state_cls=create_state,
                 total_games=games_per_iter,
                 num_parallel_games=parallel_games,
@@ -165,7 +188,6 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
                 device=device,
                 amp=amp,
                 buffer=buffer,
-                mirror_augmentation=mirror_augment,
             )
             avg_plies = sp_stats['mean_length']
             terminal_stats = sp_stats['terminal_reasons']
@@ -173,7 +195,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             print(f"  Self-play finished: {sp_stats['p1_wins']}W-{sp_stats['draws']}D-{sp_stats['p2_wins']}L in {sp_stats['elapsed_seconds']:.1f}s ({sp_stats['games_per_second']:.2f} games/s)", flush=True)
         else:
             print(f"Sequential self-play: {games_per_iter} games, {n_sims} sims/move...", flush=True)
-            evaluate = create_evaluator(net, device=device, action_size=action_size)
+            evaluate = create_evaluator(best_net, device=device, action_size=action_size)
             
             games = run_self_play_batch(
                 n_games=games_per_iter,
@@ -198,8 +220,6 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
                     states=game['states'],
                     policies=game['policies'],
                     result=game['result'],
-                    mirror_augment=mirror_augment,
-                    mirror_perm=mirror_perm,
                 )
                 reason = game['terminal_reason']
                 terminal_stats[reason] = terminal_stats.get(reason, 0) + 1
@@ -244,12 +264,6 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         if (iteration + 1) % arena_every == 0 and best_net_path:
             print(f"Arena Gating: {arena_games} games vs best incumbent...", flush=True)
             
-            # Load best network
-            best_net = copy.deepcopy(net)
-            best_checkpoint = torch.load(best_net_path, map_location=device, weights_only=False)
-            best_net.load_state_dict(best_checkpoint['model_state_dict'])
-            best_net.to(device)
-            
             best_eval = create_evaluator(best_net, device=device, action_size=action_size)
             challenger_eval = create_evaluator(net, device=device, action_size=action_size)
             
@@ -270,12 +284,15 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
                 n_games=arena_games,
                 win_threshold=win_threshold,
                 action_size=action_size,
+                opening_plies=opening_plies,
             )
             
             status_str = "PROMOTED (New best!)" if promoted else "REJECTED (Incumbent retained)"
             print(f"  Arena result: Challenger {arena_stats['p1_wins']}W-{arena_stats['draws']}D-{arena_stats['p2_wins']}L (Score: {arena_stats['p1_win_rate']:.1%}) -> {status_str}", flush=True)
             
             if promoted:
+                best_net.load_state_dict(net.state_dict())
+                best_net.eval()
                 trainer.save_checkpoint(best_net_path, iteration=iteration)
         
         # Log metrics
@@ -293,7 +310,6 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         metrics_log.append(metrics)
         
         # Save metrics
-        metrics_path = os.path.join(output_dir, 'metrics.json')
         with open(metrics_path, 'w') as f:
             json.dump(metrics_log, f, indent=2)
         
@@ -314,7 +330,9 @@ if __name__ == '__main__':
                        help='Output directory for checkpoints')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
+    add_device_argument(parser)
     
     args = parser.parse_args()
     config = load_config(args.config)
-    training_loop(config, output_dir=args.output, resume_from=args.resume)
+    training_loop(config, output_dir=args.output, resume_from=args.resume,
+                  device=args.device)

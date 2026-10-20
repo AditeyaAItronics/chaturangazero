@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from chaturanga.board import State, WHITE, BLACK, PIECE_NAMES, sq, rank_of, file_of
 from chaturanga.moves import generate_moves, apply_move, encode_action, decode_action
 from chaturanga.terminal import is_terminal
+from utils.device import get_device, describe_device, add_device_argument
 
 
 def parse_move(move_str: str) -> int:
@@ -49,7 +50,7 @@ def action_to_str(action: int) -> str:
 
 
 def play_cli(checkpoint_path: str = None, human_side: int = WHITE,
-             n_sims: int = 100, opponent: str = 'mcts'):
+             n_sims: int = 100, opponent: str = 'mcts', device=None):
     """
     Play against the agent or baseline in the terminal.
     """
@@ -58,7 +59,7 @@ def play_cli(checkpoint_path: str = None, human_side: int = WHITE,
     from net.model import create_chaturanga_net
     from net.train import create_evaluator
     
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = get_device(device)
     
     baseline_player = None
     if opponent == 'minimax':
@@ -168,7 +169,8 @@ if __name__ == '__main__':
     parser.add_argument('--opponent', type=str, default='mcts',
                        choices=['mcts', 'minimax', 'greedy', 'random'],
                        help='Opponent type: neural mcts, 3-ply minimax, greedy, or random')
+    add_device_argument(parser)
     
     args = parser.parse_args()
     human_side = WHITE if args.side == 'white' else BLACK
-    play_cli(args.checkpoint, human_side, args.sims, args.opponent)
+    play_cli(args.checkpoint, human_side, args.sims, args.opponent, device=args.device)

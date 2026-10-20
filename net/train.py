@@ -22,6 +22,7 @@ import os
 
 from .model import DualHeadNet
 from .replay import ReplayBuffer
+from utils.device import get_device
 
 
 class Trainer:
@@ -37,8 +38,9 @@ class Trainer:
         lr_milestones: list[int] = None,
         lr_gamma: float = 0.1,
         grad_clip: float = 1.0,
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+        device=None,
     ):
+        device = get_device(device)
         self.net = net.to(device)
         self.device = device
         self.lr = lr
@@ -217,14 +219,17 @@ class Trainer:
         return checkpoint
 
 
-def create_evaluator(net: DualHeadNet, device: str = 'cpu', action_size: int = 4096):
+def create_evaluator(net: DualHeadNet, device=None, action_size: int = 4096):
     """
     Create an evaluate callable for MCTS from a network.
-    
+
     The evaluate callable takes a state and returns (policy, value).
     This is the §3.4 indirection that lets the batched inference server
     replace this function without MCTS changing.
     """
+    device = get_device(device)
+    net.to(device)
+
     def evaluate(state):
         net.eval()
         with torch.no_grad():
@@ -238,6 +243,10 @@ def create_evaluator(net: DualHeadNet, device: str = 'cpu', action_size: int = 4
             # Convert to numpy
             policy = F.softmax(policy_logits, dim=1).squeeze(0).cpu().numpy()
             v = value.squeeze().item()
+
+        # Network output is in the canonical frame; MCTS works in absolute actions
+        if hasattr(state, 'orient_policy'):
+            policy = state.orient_policy(policy)
         
         return policy, v
     

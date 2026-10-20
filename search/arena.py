@@ -73,6 +73,7 @@ def arena(
     n_games: int = 60,
     action_size: int = 4096,
     verbose: bool = False,
+    opening_plies: int = 0,
 ) -> dict:
     """
     Play n_games between two players, alternating colors.
@@ -83,6 +84,10 @@ def arena(
         n_games: total games to play (should be even for fair color split)
         action_size: action space size
         verbose: print progress
+        opening_plies: if > 0, each pair of games starts from the same random
+            opening of this many plies, once with each player to move first.
+            Without this, two deterministic players (argmax MCTS, no noise)
+            replay the same 2 games for the whole match.
     
     Returns:
         dict with 'p1_wins', 'p2_wins', 'draws', 'p1_win_rate', 'results'
@@ -92,8 +97,11 @@ def arena(
     draws = 0
     results = []
     
+    state = None
     for game_idx in range(n_games):
-        state = create_state()
+        # A new opening for every pair, shared by both games of the pair
+        if game_idx % 2 == 0 or state is None:
+            state = random_opening(create_state, opening_plies)
         
         # Alternate who goes first
         if game_idx % 2 == 0:
@@ -126,6 +134,23 @@ def arena(
     }
 
 
+def random_opening(create_state: Callable, n_plies: int, max_tries: int = 100):
+    """
+    Return a fresh state advanced by n_plies uniformly random legal moves,
+    retrying if a random line happens to end the game.
+    """
+    for _ in range(max_tries):
+        state = create_state()
+        for _ in range(n_plies):
+            done, _ = state.is_terminal()
+            if done:
+                break
+            state = state.apply(int(np.random.choice(state.legal_moves())))
+        if not state.is_terminal()[0]:
+            return state
+    return create_state()
+
+
 def gate_model(
     challenger: Callable,
     incumbent: Callable,
@@ -134,6 +159,7 @@ def gate_model(
     win_threshold: float = 0.55,
     action_size: int = 4096,
     verbose: bool = True,
+    opening_plies: int = 0,
 ) -> tuple[bool, dict]:
     """
     Arena gating: does the challenger beat the incumbent?
@@ -141,6 +167,7 @@ def gate_model(
     Returns:
         (promoted, stats) — True if challenger's win rate >= threshold.
     """
-    stats = arena(challenger, incumbent, create_state, n_games, action_size, verbose=verbose)
+    stats = arena(challenger, incumbent, create_state, n_games, action_size,
+                  verbose=verbose, opening_plies=opening_plies)
     promoted = stats['p1_win_rate'] >= win_threshold
     return promoted, stats

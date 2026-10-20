@@ -20,6 +20,7 @@ from typing import Callable, Optional, Type
 from search.node import Node
 from search.mcts import _select_action, _backup, select_action_with_temperature
 from net.replay import ReplayBuffer
+from utils.device import get_device, use_amp
 
 
 class BatchedEvaluator:
@@ -28,10 +29,10 @@ class BatchedEvaluator:
     
     Can evaluate a batch of states in a single forward pass.
     """
-    def __init__(self, net: torch.nn.Module, device: str = 'cuda', amp: bool = True):
-        self.device = torch.device(device if isinstance(device, str) else device)
+    def __init__(self, net: torch.nn.Module, device=None, amp: bool = True):
+        self.device = get_device(device)
         self.net = net.to(self.device)
-        self.amp = amp and (self.device.type == 'cuda')
+        self.amp = use_amp(self.device, amp)
         self.net.eval()
 
     def evaluate_batch(self, states: list) -> tuple[np.ndarray, np.ndarray]:
@@ -50,11 +51,11 @@ class BatchedEvaluator:
 
         # Vectorized encoding across all states in the batch
         encodings = np.stack([s.encode() for s in states], axis=0)
-        x = torch.from_numpy(encodings).to(self.device, non_blocking=True)
+        x = torch.from_numpy(encodings).to(self.device, non_blocking=self.device.type == 'cuda')
 
         with torch.inference_mode():
             if self.amp:
-                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                with torch.autocast(device_type=self.device.type, dtype=torch.float16):
                     policy_logits, values = self.net(x)
             else:
                 policy_logits, values = self.net(x)
@@ -65,6 +66,11 @@ class BatchedEvaluator:
         # Handle scalar output if B=1
         if vals.ndim == 0:
             vals = np.array([vals.item()], dtype=np.float32)
+
+        # Network output is in the canonical frame; MCTS works in absolute actions
+        for i, s in enumerate(states):
+            if hasattr(s, 'orient_policy'):
+                policies[i] = s.orient_policy(policies[i])
 
         return policies, vals
 
@@ -101,10 +107,9 @@ def run_batched_self_play(
     dirichlet_alpha: float = 0.3,
     dirichlet_eps: float = 0.25,
     temp_threshold: int = 15,
-    device: str = 'cuda',
+    device=None,
     amp: bool = True,
     buffer: Optional[ReplayBuffer] = None,
-    mirror_augmentation: bool = True,
 ) -> dict:
     """
     Generate self-play games using parallel-games batched MCTS.
@@ -120,10 +125,9 @@ def run_batched_self_play(
         dirichlet_alpha: Dirichlet noise parameter.
         dirichlet_eps: Weight of Dirichlet noise at root.
         temp_threshold: Number of plies with temperature=1.0.
-        device: 'cuda' or 'cpu'.
+        device: 'auto', 'cpu', 'cuda', 'cuda:N' or None (auto-detect).
         amp: Whether to use FP16 automatic mixed precision.
         buffer: Optional ReplayBuffer to add training examples directly.
-        mirror_augmentation: Whether to add mirrored positions to buffer.
         
     Returns:
         dict of run statistics (games, wins, losses, draws, mean_length, elapsed_time).
@@ -242,9 +246,9 @@ def run_batched_self_play(
                 visit_dist, temp, slot.state.legal_moves()
             )
 
-            # Record trajectory step
+            # Record trajectory step — π stored in the same canonical frame as the encoding
             encoded = slot.state.encode()
-            slot.history.append((encoded, pi, slot.state.side_to_move))
+            slot.history.append((encoded, slot.state.orient_policy(pi), slot.state.side_to_move))
 
             # Apply move
             slot.state = slot.state.apply(action)
@@ -295,28 +299,9 @@ def run_batched_self_play(
                     for s_enc, pi_dist, side in slot.history:
                         # Target value: +1 if this side won, -1 if lost, 0 if draw
                         target_v = float(winner * side) if winner != 0 else 0.0
+                        # Mirror augmentation happens in ReplayBuffer.sample()
                         buffer.add(s_enc, pi_dist, target_v)
                         stats['samples_generated'] += 1
-
-                        if mirror_augmentation:
-                            # Horizontal mirror
-                            # Connect-4: flip along width axis (axis 2), flip columns
-                            # Chaturanga: flip along width axis (axis 2), apply action permutation
-                            if hasattr(slot.state, 'mirror_action_permutation'):
-                                perm = slot.state.mirror_action_permutation()
-                                mir_s = np.flip(s_enc, axis=2).copy()
-                                mir_pi = pi_dist[perm].copy()
-                                buffer.add(mir_s, mir_pi, target_v)
-                            elif hasattr(slot.state, 'mirror'):
-                                _, perm = slot.state.mirror()
-                                mir_s = np.flip(s_enc, axis=2).copy()
-                                mir_pi = pi_dist[perm].copy()
-                                buffer.add(mir_s, mir_pi, target_v)
-                            else:
-                                mir_s = np.flip(s_enc, axis=2).copy()
-                                mir_pi = pi_dist[::-1].copy()
-                                buffer.add(mir_s, mir_pi, target_v)
-                            stats['samples_generated'] += 1
 
                 # If we still have games left to start, reset this slot
                 if games_started < total_games:
