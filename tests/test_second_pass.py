@@ -609,3 +609,56 @@ def test_n11_arena_uses_the_configured_search_budget(tmp_path, monkeypatch, aren
         arena = json.load(f)[0]['arena']
     assert arena['sims'] == expected and len(arena['score_ci95']) == 2
     assert arena['score_ci95'][0] <= arena['score'] <= arena['score_ci95'][1]
+
+
+# --- N3: the web app refuses moves after the game or out of turn ------------
+
+@pytest.fixture
+def web_client():
+    pytest.importorskip('flask')
+    from web import app as web_app
+    s = web_app.current_session
+    saved = (s.game, s.p1_type, s.p2_type, s.state, list(s.history), list(s.move_log))
+    yield web_app, web_app.app.test_client()
+    s.game, s.p1_type, s.p2_type, s.state, s.history, s.move_log = saved
+
+
+def _raja_captured_position() -> State:
+    """Black to move, Black's Raja already captured: the game is over."""
+    board = np.zeros(64, dtype=np.int8)
+    board[sq(0, 0)] = RAJA
+    board[sq(7, 7)] = RATHA
+    board[sq(6, 0)] = -PADATI        # Black still has a pseudo-legal move
+    return State(board=board, side_to_move=BLACK, ply_count=20)
+
+
+def test_n3_no_moves_after_game_over(web_client):
+    web_app, client = web_client
+    web_app.current_session.game = 'chaturanga'
+    web_app.current_session.p1_type = web_app.current_session.p2_type = 'human'
+    web_app.current_session.state = _raja_captured_position()
+    move = web_app.current_session.state.legal_moves()[0]
+    r = client.post('/api/make_move', json={'action': move})
+    assert r.status_code == 400 and 'terminal' in r.get_json()['error']
+
+
+def test_n3_no_move_at_the_cap_crashes(web_client):
+    web_app, client = web_client
+    web_app.current_session.game = 'chaturanga'
+    web_app.current_session.p1_type = web_app.current_session.p2_type = 'human'
+    state = _materially_won_one_ply_before_cap()
+    web_app.current_session.state = state.apply(state.legal_moves()[0])     # at the cap
+    r = client.post('/api/make_move', json={'action': web_app.current_session.state.legal_moves()[0]})
+    assert r.status_code == 400, "a move at the cap used to trip apply_move's assertion (HTTP 500)"
+
+
+def test_n3_human_cannot_move_for_the_ai(web_client):
+    web_app, client = web_client
+    web_app.current_session.game = 'chaturanga'
+    web_app.current_session.p1_type, web_app.current_session.p2_type = 'random', 'human'
+    web_app.current_session.state = State()            # White (the AI) to move
+    r = client.post('/api/make_move', json={'action': State().legal_moves()[0]})
+    assert r.status_code == 400
+    web_app.current_session.p1_type = 'human'
+    r = client.post('/api/make_move', json={'action': State().legal_moves()[0]})
+    assert r.status_code == 200

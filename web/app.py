@@ -340,6 +340,13 @@ def make_move():
 
     action = int(action)
     state = current_session.state
+    # A finished game has no next move (pseudo-legal moves still exist after a
+    # Raja capture, and applying one at the move cap trips apply_move's
+    # assertion), and the human may only move for a human side (needtofixagain N3)
+    if state.is_terminal(adjudicate=False)[0]:
+        return jsonify({'error': 'game is already terminal'}), 400
+    if current_session.current_player_type() != 'human':
+        return jsonify({'error': 'it is not a human player\'s turn'}), 400
     legal = state.legal_moves()
     if action not in legal:
         return jsonify({'error': f'illegal action {action}'}), 400
