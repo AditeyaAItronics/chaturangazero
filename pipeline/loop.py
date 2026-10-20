@@ -403,6 +403,10 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             'raja_captures_missed': sp_stats.get('raja_captures_missed', 0),
             'raja_capture_miss_rate': sp_stats.get('raja_capture_miss_rate', 0.0),
             'eval_cache_hit_rate': sp_stats.get('eval_cache_hit_rate', 0.0),
+            # Batched-server search accounting (Phase 4 tuning of leaves_per_step / virtual_loss)
+            'virtual_loss_collisions': sp_stats.get('virtual_loss_collisions', 0),
+            'simulations_per_move': (sp_stats['simulations'] / sp_stats['moves']
+                                     if sp_stats.get('moves') else None),
         }
         print(f"  Self-play finished: {sp_stats['p1_wins']}W-{sp_stats['draws']}D-{sp_stats['p2_wins']}L "
               f"in {sp_stats['elapsed_seconds']:.1f}s ({selfplay_diagnostics['games_per_hour']:.0f} games/h) | "

@@ -163,10 +163,17 @@ def run_batched_self_play(
         'raja_capture_chances': 0,   # moves where a Raja capture was legal
         'raja_captures_missed': 0,   # ...and a different move was played
         'virtual_loss_collisions': 0,
+        'simulations': 0,            # completed simulations (each backs up one leaf)
+        'moves': 0,                  # moves chosen by search
+        'simulations_dropped': 0,    # unused budget; always 0 (kept as a tripwire)
     }
     cache = EvalCache(eval_cache_size) if eval_cache_size > 0 else None
     leaves_per_step = max(1, int(leaves_per_step))
-    n_steps = -(-n_sims // leaves_per_step)   # ceil: total simulations per move stay n_sims
+    # Steps per move: ceil(n_sims / leaves_per_step) without collisions. A collision
+    # is retried on a later step instead of being dropped (needtofixagain N6), so a
+    # move can take more steps. The first descent of a step can never collide, so
+    # every active game completes >= 1 simulation per step and n_sims steps suffice.
+    max_steps = n_sims
 
     start_time = time.time()
 
@@ -183,7 +190,9 @@ def run_batched_self_play(
         #    (virtual loss on pending paths), then ONE batched forward pass
         #    evaluates all new leaves from all games.
         sims_left = {i: n_sims for i, slot in enumerate(slots) if not slot.done}
-        for _ in range(n_steps):
+        for _ in range(max_steps):
+            if not any(v > 0 for v in sims_left.values()):
+                break
             pending = []          # (slot_idx, leaf, path)
             pending_ids = set()
 
@@ -194,11 +203,13 @@ def run_batched_self_play(
                     leaf, path = _descend(slot.root, c_puct, virtual_loss, action_size)
 
                     if id(leaf) in pending_ids:
-                        # Two descents reached the same unevaluated leaf: undo and skip
+                        # Two descents reached the same unevaluated leaf: undo it and
+                        # retry on the next step, once that leaf has been evaluated
                         _revert_virtual_loss(path, virtual_loss)
                         stats['virtual_loss_collisions'] += 1
-                        continue
+                        break
                     sims_left[i] -= 1
+                    stats['simulations'] += 1
 
                     value = _try_expand_without_network(leaf, cache)
                     if value is not None:
@@ -230,6 +241,8 @@ def run_batched_self_play(
                 _revert_virtual_loss(path, virtual_loss)
                 _backup(leaf, value)
 
+        stats['simulations_dropped'] += sum(max(v, 0) for v in sims_left.values())
+
         # 2. SELECT MOVES for each active slot
         new_roots = []    # roots that still need expanding, done in one batch below
         for i, slot in enumerate(slots):
@@ -241,6 +254,7 @@ def run_batched_self_play(
             temp = 1.0 if slot.state.ply_count < temp_threshold else 0.0
             legal_now = slot.state.legal_moves()
             action, pi = select_action_with_temperature(visit_dist, temp, legal_now)
+            stats['moves'] += 1
 
             # Diagnostic (§2.1): was a free Raja capture on the board, and missed?
             raja_captures = _raja_capture_actions(slot.state, legal_now)

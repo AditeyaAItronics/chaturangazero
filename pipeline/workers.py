@@ -63,7 +63,8 @@ def _worker(task: dict):
 
 _SUMMED = ('games', 'p1_wins', 'p2_wins', 'draws', 'samples_generated',
            'raja_capture_chances', 'raja_captures_missed', 'virtual_loss_collisions',
-           'eval_cache_hits', 'eval_cache_misses')
+           'eval_cache_hits', 'eval_cache_misses',
+           'simulations', 'moves', 'simulations_dropped')
 
 
 def merge_stats(parts: list[dict], wall_seconds: float) -> dict:

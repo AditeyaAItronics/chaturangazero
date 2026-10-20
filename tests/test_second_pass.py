@@ -488,3 +488,36 @@ def test_n4_startup_supervises_training():
     with open(os.path.join(INFRA, 'create_vm.sh'), encoding='utf-8') as f:
         vm = f.read()
     assert 'cz-heartbeat-minutes' in vm and 'cz-mig=' in vm and 'compute-rw' in vm
+
+
+# --- N6: virtual-loss collisions are retried, never dropped -----------------
+
+@pytest.mark.parametrize('leaves', [4, 8])
+def test_n6_every_move_gets_its_full_simulation_budget(leaves):
+    import torch
+    from connect4.game import Connect4State
+    from net.model import create_connect4_net
+    from pipeline.inference_server import run_batched_self_play
+    torch.manual_seed(0)
+    np.random.seed(0)
+    stats = run_batched_self_play(create_connect4_net(1, 8), Connect4State, total_games=4,
+                                  num_parallel_games=4, n_sims=16, action_size=7,
+                                  device='cpu', amp=False, reuse_subtree=False,
+                                  leaves_per_step=leaves, virtual_loss=0.0, eval_cache_size=0)   # no VL: extra descents collide (worst case)
+    assert stats['virtual_loss_collisions'] > 0, "scenario: collisions must actually happen"
+    assert stats['simulations'] == 16 * stats['moves'], \
+        f"{16 * stats['moves'] - stats['simulations']} simulations lost to collisions"
+    assert stats['simulations_dropped'] == 0
+
+
+def test_n6_search_accounting_reaches_metrics(tmp_path):
+    import json
+    from pipeline.loop import training_loop
+    config = _tiny_connect4_config(iterations=1, arena_every=99)
+    config['mcts'].update({'leaves_per_step': 4, 'virtual_loss': 0.0})
+    out = str(tmp_path / 'run')
+    training_loop(config, output_dir=out)
+    with open(os.path.join(out, 'metrics.json')) as f:
+        m = json.load(f)[0]
+    assert m['simulations_per_move'] == config['mcts']['sims']
+    assert m['virtual_loss_collisions'] > 0
