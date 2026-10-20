@@ -37,7 +37,7 @@ play:
 train:
   optimizer: adamw              # decoupled weight decay (needtofix L3); "adam" = plan's explicit L2 loss
   lr: 2.0e-3
-  lr_milestones: [80, 200]
+  lr_milestones: [80, 160]      # training iterations; both inside the 200-iteration run (N17)
   lr_gamma: 0.1
   batch_size: 256
   l2: 1.0e-4                # c in the explicit L2 term, used only with optimizer: adam
@@ -59,7 +59,7 @@ arena:
 
 loop:
   games_per_iter: 200
-  iterations: 100
+  iterations: 200             # plan Tier B (local 3060): 200 iterations at 40 sims
   parallel_games: 32
   workers: 4               # self-play processes (1 = in-process)
 

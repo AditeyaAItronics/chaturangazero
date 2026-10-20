@@ -26,7 +26,8 @@ play:
 train:
   optimizer: adamw              # decoupled weight decay (needtofix L3); "adam" = plan's explicit L2 loss
   lr: 2.0e-3
-  lr_milestones: [30, 60]
+  lr_milestones: [30, 60]       # 60 is past the 50 iterations, so only the first decay happens;
+                                # kept as-is because this is the proven Phase-0 setting
   lr_gamma: 0.1
   batch_size: 256
   l2: 1.0e-4                # c in the explicit L2 term, used only with optimizer: adam

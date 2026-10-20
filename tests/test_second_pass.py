@@ -783,6 +783,20 @@ def test_n14_missing_checkpoint_is_labelled_not_disguised(web_client, tmp_path, 
     assert 'played a random move' in r.get_json()['ai_stats']['note']
 
 
+# --- N17: every LR milestone of the shipped Chaturanga configs is reachable --
+
+@pytest.mark.parametrize('name', ['cloud.yaml', 'local.yaml'])
+def test_n17_lr_milestones_fall_inside_the_run(name):
+    from pipeline.loop import load_config
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    config = load_config(os.path.join(root, 'configs', name))
+    iterations = config['loop']['iterations']
+    assert all(m < iterations for m in config['train']['lr_milestones']), \
+        f"{name}: milestones {config['train']['lr_milestones']} vs {iterations} iterations"
+    if name == 'local.yaml':
+        assert iterations == 200 and config['mcts']['sims'] == 40     # plan Tier B
+
+
 # --- N16: eval/elo.py plots handle iterations without training stats --------
 
 _METRICS_WARMUP_FIRST = [
