@@ -383,3 +383,108 @@ def test_n5_resume_keeps_untrained_warmup_positions(tmp_path, monkeypatch):
     loop.training_loop(config, output_dir=out, resume_from='auto')
     assert seen[0] > marker['buffer_total_added'], \
         "after resume, iteration 0's warm-up positions must still count as untrained"
+
+
+# --- N4: the cloud VM never idles while not training ------------------------
+
+INFRA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'infra')
+
+
+def _bash():
+    import shutil
+    bash = shutil.which('bash')
+    if bash is None:
+        pytest.skip('bash not available')
+    return bash
+
+
+def _run_watchdog(tmp_path, max_age, timeout, keep_fresh=False, old_heartbeat=False):
+    import subprocess
+    import threading
+    import time
+    heartbeat = tmp_path / 'metrics.json'
+    fired = tmp_path / 'fired'
+    if old_heartbeat:                      # e.g. pulled from the bucket, hours old
+        heartbeat.write_text('[]')
+        os.utime(heartbeat, (time.time() - 10_000, time.time() - 10_000))
+    stop = threading.Event()
+
+    def writer():
+        while not stop.is_set():
+            heartbeat.write_text('[]')
+            time.sleep(0.3)
+
+    if keep_fresh:
+        threading.Thread(target=writer, daemon=True).start()
+    cmd = [_bash(), os.path.join(INFRA, 'watchdog.sh'), heartbeat.as_posix(),
+           str(max_age), '1', 'touch', fired.as_posix()]
+    try:
+        subprocess.run(cmd, timeout=timeout, capture_output=True)
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        stop.set()
+    return fired.exists()
+
+
+def test_n4_watchdog_fires_on_a_stale_heartbeat(tmp_path):
+    assert _run_watchdog(tmp_path, max_age=2, timeout=15)
+
+
+def test_n4_watchdog_grace_counts_from_its_own_start(tmp_path):
+    """An hours-old metrics.json pulled from the bucket is not 'stale' at boot."""
+    assert not _run_watchdog(tmp_path, max_age=4, timeout=3, old_heartbeat=True)
+
+
+def test_n4_watchdog_quiet_while_training_progresses(tmp_path):
+    assert not _run_watchdog(tmp_path, max_age=2, timeout=6, keep_fresh=True)
+
+
+def _run_training_wrapper(tmp_path, exit_code: int, mig: str = 'cz-train-mig'):
+    import subprocess
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    calls = tmp_path / 'gcloud_calls'
+    stub = bin_dir / 'gcloud'
+    stub.write_text(f'#!/usr/bin/env bash\necho "$@" >> "{calls.as_posix()}"\n', newline='\n')
+    stub.chmod(0o755)
+    env = dict(os.environ, CZ_MIG=mig, CZ_ZONE='us-central1-a')
+    env['PATH'] = bin_dir.as_posix() + os.pathsep + env.get('PATH', '')
+    script = (f'export PATH="{bin_dir.as_posix()}:$PATH"; '
+              f'bash "{os.path.join(INFRA, "run_training.sh")}" bash -c "exit {exit_code}"')
+    result = subprocess.run([_bash(), '-c', script], env=env, capture_output=True, text=True,
+                            timeout=60)
+    return result.returncode, (calls.read_text() if calls.exists() else '')
+
+
+def test_n4_finished_run_resizes_the_group_to_zero(tmp_path):
+    code, calls = _run_training_wrapper(tmp_path, exit_code=0)
+    assert code == 0
+    assert 'instance-groups managed resize cz-train-mig --size 0 --zone us-central1-a' in calls
+
+
+@pytest.mark.parametrize('exit_code', [1, 143])
+def test_n4_crash_or_preemption_does_not_resize(tmp_path, exit_code):
+    code, calls = _run_training_wrapper(tmp_path, exit_code=exit_code)
+    assert code == exit_code and calls == '', "only a finished run may stop the group"
+
+
+def test_n4_no_mig_no_resize(tmp_path):
+    code, calls = _run_training_wrapper(tmp_path, exit_code=0, mig='')
+    assert code == 0 and calls == ''
+
+
+def test_n4_startup_supervises_training():
+    with open(os.path.join(INFRA, 'startup.sh'), encoding='utf-8') as f:
+        script = f.read()
+    assert 'nohup' not in script, "training must not be a fire-and-forget background job"
+    for needle in ('Restart=on-failure', 'SuccessExitStatus=143', 'cz-watchdog.service',
+                   'watchdog.sh', "trap 'on_error $LINENO' ERR", 'nvidia-smi',
+                   'run_training.sh', 'MAX_STARTUP_FAILURES', 'CZ_MIG=$MIG'):
+        assert needle in script, needle
+    # 143 is the training loop's SIGTERM exit code
+    with open(os.path.join(os.path.dirname(INFRA), 'pipeline', 'loop.py'), encoding='utf-8') as f:
+        assert 'sys.exit(143)' in f.read()
+    with open(os.path.join(INFRA, 'create_vm.sh'), encoding='utf-8') as f:
+        vm = f.read()
+    assert 'cz-heartbeat-minutes' in vm and 'cz-mig=' in vm and 'compute-rw' in vm

@@ -2,6 +2,9 @@
 # Create the spot training VM as a 1-instance managed instance group (MIG)
 # (Phase 4b, needtofix I3).
 #
+# compute-rw scope: the VM resizes its own group to 0 when the run is finished
+# (infra/run_training.sh) or startup keeps failing, so nothing bills after that.
+#
 # Why a MIG: when a spot VM is preempted, the MIG automatically creates a
 # replacement. Its startup script (infra/startup.sh) restores the run from
 # the bucket and resumes, so training continues unattended.
@@ -33,6 +36,7 @@ REPO="${REPO:?set REPO=https://github.com/owner/repo.git}"
 BRANCH="${BRANCH:-main}"
 RUN="${RUN:-main}"
 CONFIG="${CONFIG:-configs/cloud.yaml}"
+HEARTBEAT_MIN="${HEARTBEAT_MIN:-240}"   # watchdog: shut down if no iteration finishes for this long
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -44,8 +48,8 @@ gcloud compute instance-templates create "$NAME-template" \
   --maintenance-policy=TERMINATE \
   --image-family="$IMAGE_FAMILY" --image-project="$IMAGE_PROJECT" \
   --boot-disk-size="${DISK_GB}GB" \
-  --scopes=storage-rw \
-  --metadata=install-nvidia-driver=True,cz-repo="$REPO",cz-branch="$BRANCH",cz-bucket="$BUCKET",cz-run="$RUN",cz-config="$CONFIG" \
+  --scopes=storage-rw,compute-rw \
+  --metadata=install-nvidia-driver=True,cz-repo="$REPO",cz-branch="$BRANCH",cz-bucket="$BUCKET",cz-run="$RUN",cz-config="$CONFIG",cz-heartbeat-minutes="$HEARTBEAT_MIN",cz-mig="$NAME-mig" \
   --metadata-from-file=startup-script="$HERE/startup.sh"
 
 gcloud compute instance-groups managed create "$NAME-mig" \
