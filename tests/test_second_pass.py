@@ -1016,6 +1016,28 @@ def test_n20_shards_with_sparse_snapshots(tmp_path, monkeypatch):
         assert partial.total_added == int(data['total_added']) == len(partial)
 
 
+# --- metrics.json: iteration wall time isn't overwritten by training time ---
+
+def test_iteration_time_not_overwritten_by_training_time(tmp_path, monkeypatch):
+    import json
+    import time
+    import pipeline.loop as loop
+    real_sp = loop.run_batched_self_play
+
+    def slow_selfplay(*a, **k):
+        time.sleep(0.5)                  # self-play time that only the iteration total includes
+        return real_sp(*a, **k)
+
+    monkeypatch.setattr(loop, 'run_batched_self_play', slow_selfplay)
+    out = str(tmp_path / 'run')
+    loop.training_loop(_tiny_connect4_config(iterations=1, arena_every=99), output_dir=out)
+    with open(os.path.join(out, 'metrics.json')) as f:
+        m = json.load(f)[0]
+    assert m['train_steps'] > 0 and 'train_elapsed_seconds' in m
+    assert m['elapsed_seconds'] >= 0.5 + m['train_elapsed_seconds'], \
+        "elapsed_seconds was replaced by the trainer's training-only time"
+
+
 # --- N17: every LR milestone of the shipped Chaturanga configs is reachable --
 
 @pytest.mark.parametrize('name', ['cloud.yaml', 'local.yaml'])

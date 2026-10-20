@@ -589,7 +589,10 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             **training_diagnostics,
         }
         if train_stats:
-            metrics.update(train_stats)
+            # The trainer's 'elapsed_seconds' is training time only; keep it under
+            # its own name so it can't overwrite the iteration's wall time above
+            metrics.update({('train_elapsed_seconds' if k == 'elapsed_seconds' else k): v
+                            for k, v in train_stats.items()})
         if arena_record is not None:
             metrics['arena'] = arena_record
         metrics_log.append(metrics)
