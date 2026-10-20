@@ -377,23 +377,27 @@ def _revert_virtual_loss(path, virtual_loss: float):
         node.W[edge] += virtual_loss
 
 
-def _try_expand_without_network(leaf: Node, cache: Optional[EvalCache]) -> Optional[float]:
+def _try_expand_without_network(leaf: Node, cache: Optional[EvalCache],
+                                adjudicate: bool = True) -> Optional[float]:
     """
     Resolve a leaf without the network if possible: an already-terminal node,
     a cache hit, or a new terminal position. Returns its value (side to move),
     or None if the network must evaluate it.
+
+    adjudicate: score a move-cap leaf by material (self-play) or as a draw
+    (arena/evaluation, §2.2).
     """
     if leaf.is_terminal:
         return leaf.terminal_value
     if cache is not None:
-        entry = cache.get(leaf.state)
+        entry = cache.get(leaf.state, adjudicate)
         if entry is not None:
             return apply_entry(leaf, entry)
-    done, z = leaf.state.is_terminal()
+    done, z = leaf.state.is_terminal(adjudicate=adjudicate)
     if done:
         leaf.set_terminal(z)
         if cache is not None:
-            cache.put_terminal(leaf.state, z)
+            cache.put_terminal(leaf.state, z, adjudicate)
         return z
     return None
 
@@ -417,14 +421,15 @@ def _normalised_priors(policy: np.ndarray, legal: list[int]) -> np.ndarray:
     return np.full(len(legal), 1.0 / len(legal))
 
 
-def _expand_roots(nodes: list, evaluator, cache: Optional[EvalCache]) -> None:
+def _expand_roots(nodes: list, evaluator, cache: Optional[EvalCache],
+                  adjudicate: bool = True) -> None:
     """
     Expand a list of fresh root nodes with ONE batched forward pass (S5):
     cache hits and terminal roots need no network call at all.
     """
     pending = []
     for node in nodes:
-        if _try_expand_without_network(node, cache) is None:
+        if _try_expand_without_network(node, cache, adjudicate) is None:
             pending.append(node)
     if not pending:
         return
@@ -437,7 +442,7 @@ def _expand_roots(nodes: list, evaluator, cache: Optional[EvalCache]) -> None:
         priors = _normalised_priors(policies[k], legal)
         node.expand(legal, priors)
         if cache is not None:
-            cache.put_eval(node.state, legal, priors, float(values[k]))
+            cache.put_eval(node.state, legal, priors, float(values[k]), adjudicate)
 
 
 def run_batched_arena(
@@ -495,7 +500,8 @@ def run_batched_arena(
         roots = [Node(g[0], action_size=action_size) for g in active]
         owners = [player_of(g) for g in active]
         for p in (0, 1):
-            _expand_roots([r for r, o in zip(roots, owners) if o == p], evaluators[p], caches[p])
+            _expand_roots([r for r, o in zip(roots, owners) if o == p], evaluators[p], caches[p],
+                          adjudicate=False)
 
         budgets = (n_sims, n_sims if n_sims_b is None else n_sims_b)
         for step in range(max(budgets)):
@@ -504,7 +510,8 @@ def run_batched_arena(
                 if step >= budgets[owner]:
                     continue
                 leaf, path = _descend(root, c_puct, 0.0, action_size)
-                value = _try_expand_without_network(leaf, caches[owner])
+                # The arena scores a capped game as a draw, so its search must too (N1)
+                value = _try_expand_without_network(leaf, caches[owner], adjudicate=False)
                 if value is not None:
                     _backup(leaf, value)
                 else:
@@ -518,7 +525,8 @@ def run_batched_arena(
                     priors = _normalised_priors(policies[k], legal)
                     leaf.expand(legal, priors)
                     if caches[p] is not None:
-                        caches[p].put_eval(leaf.state, legal, priors, float(values[k]))
+                        caches[p].put_eval(leaf.state, legal, priors, float(values[k]),
+                                           adjudicate=False)
                     _backup(leaf, float(values[k]))
 
         for game, root in zip(active, roots):

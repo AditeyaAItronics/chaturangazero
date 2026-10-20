@@ -166,7 +166,8 @@ def _with_session_lock(route):
 def serialize_state(session: GameSession) -> dict:
     state = session.state
     game = session.game
-    done, z = state.is_terminal()
+    # Material adjudication is a training-only device (§2.2): a capped game is a draw
+    done, z = state.is_terminal(adjudicate=False)
 
     # Determine legal moves with full coordinates
     legal_moves_data = []
@@ -370,7 +371,7 @@ def make_move():
 @_with_session_lock
 def ai_move():
     state = current_session.state
-    done, _ = state.is_terminal()
+    done, _ = state.is_terminal(adjudicate=False)
     if done:
         return jsonify({'error': 'game is already terminal'}), 400
 
@@ -395,6 +396,7 @@ def ai_move():
                 action_size=action_size,
                 c_puct=c_puct,
                 add_noise=False,
+                adjudicate=False,   # a capped human game is a draw (§2.2)
             )
             legal = state.legal_moves()
             legal_vc = {int(a): int(vc[a]) for a in legal}

@@ -106,7 +106,8 @@ def play_cli(checkpoint_path: str = None, human_side: int = WHITE,
     while True:
         print(f"\n{state.display()}")
         
-        done, z = is_terminal(state)
+        # Material adjudication is a training-only device (§2.2): a capped game is a draw
+        done, z = is_terminal(state, adjudicate=False)
         if done:
             if state.side_to_move == human_side:
                 result = z
@@ -158,6 +159,7 @@ def play_cli(checkpoint_path: str = None, human_side: int = WHITE,
                     action_size=4096,
                     c_puct=1.5,
                     add_noise=False,
+                    adjudicate=False,   # a capped human game is a draw (§2.2)
                 )
                 action = int(np.argmax(visit_counts))
             print(f"AI plays: {action_to_str(action)}")

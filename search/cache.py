@@ -10,8 +10,10 @@ The cache maps a position to what expansion needs:
     terminal positions  -> ('terminal', z)
     other positions     -> ('eval', legal_actions, priors over legal_actions, value)
 
-Keyed on State.key() plus the ply count, because the network input includes
-the ply plane (§3.2) and the move cap depends on it. Entries are only valid
+Keyed on State.key(), the ply count (the network input includes the ply
+plane, §3.2, and the move cap depends on it) and the adjudication mode: a
+move-cap position is terminal in both modes but scores differently (material
+in self-play, draw in arena/evaluation; needtofixagain N1). Entries are only valid
 for one network, so create a fresh cache whenever the weights change.
 
 Only evaluations are shared; each tree keeps its own visit statistics, so the
@@ -37,11 +39,11 @@ class EvalCache:
         return len(self._data)
 
     @staticmethod
-    def key(state):
-        return (state.key(), getattr(state, 'ply_count', 0))
+    def key(state, adjudicate: bool = True):
+        return (state.key(), getattr(state, 'ply_count', 0), bool(adjudicate))
 
-    def get(self, state) -> Optional[tuple]:
-        k = self.key(state)
+    def get(self, state, adjudicate: bool = True) -> Optional[tuple]:
+        k = self.key(state, adjudicate)
         entry = self._data.get(k)
         if entry is None:
             self.misses += 1
@@ -50,22 +52,23 @@ class EvalCache:
         self.hits += 1
         return entry
 
-    def _put(self, state, entry: tuple):
+    def _put(self, state, entry: tuple, adjudicate: bool = True):
         if self.max_entries <= 0:
             return
-        k = self.key(state)
+        k = self.key(state, adjudicate)
         self._data[k] = entry
         self._data.move_to_end(k)
         if len(self._data) > self.max_entries:
             self._data.popitem(last=False)
 
-    def put_terminal(self, state, z: float):
-        self._put(state, ('terminal', float(z)))
+    def put_terminal(self, state, z: float, adjudicate: bool = True):
+        self._put(state, ('terminal', float(z)), adjudicate)
 
-    def put_eval(self, state, legal_actions: list[int], priors: np.ndarray, value: float):
+    def put_eval(self, state, legal_actions: list[int], priors: np.ndarray, value: float,
+                 adjudicate: bool = True):
         """priors: probabilities for legal_actions, in the same order (already masked)."""
         self._put(state, ('eval', list(legal_actions),
-                          np.asarray(priors, dtype=np.float32).copy(), float(value)))
+                          np.asarray(priors, dtype=np.float32).copy(), float(value)), adjudicate)
 
     @property
     def hit_rate(self) -> float:

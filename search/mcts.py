@@ -29,6 +29,7 @@ def search(
     root_node: Optional[Node] = None,
     cache: Optional[EvalCache] = None,
     return_root: bool = False,
+    adjudicate: bool = True,
 ):
     """
     Run MCTS from the given state.
@@ -48,6 +49,9 @@ def search(
         cache: Optional EvalCache shared across searches (transposition table).
         return_root: also return the root node, so the caller can reuse the
             chosen child's subtree on the next move.
+        adjudicate: score move-cap leaves by material (self-play training,
+            §2.2) if True; as draws if False. Arena, evaluation, web and CLI
+            games score a capped game as a draw, so their search must too.
 
     Returns:
         visit_counts: np.ndarray of shape (action_size,) — raw visit counts,
@@ -61,7 +65,7 @@ def search(
         root.parent_edge = -1
     else:
         root = Node(state, action_size=action_size)
-        _expand(root, evaluate, action_size, cache)
+        _expand(root, evaluate, action_size, cache, adjudicate)
 
     # Add Dirichlet noise at the root
     if add_noise:
@@ -88,7 +92,7 @@ def search(
 
         # 2. EXPAND & EVALUATE
         if not node.is_expanded and not node.is_terminal:
-            value = _expand(node, evaluate, action_size, cache)
+            value = _expand(node, evaluate, action_size, cache, adjudicate)
         elif node.is_terminal:
             value = node.terminal_value
         else:
@@ -104,7 +108,7 @@ def search(
 
 
 def _expand(node: Node, evaluate: Callable, action_size: int,
-            cache: Optional[EvalCache] = None) -> float:
+            cache: Optional[EvalCache] = None, adjudicate: bool = True) -> float:
     """
     Expand a node: check terminal, get policy/value from evaluator.
     Returns the value of this node from the side-to-move's perspective.
@@ -112,16 +116,16 @@ def _expand(node: Node, evaluate: Callable, action_size: int,
     state = node.state
 
     if cache is not None:
-        entry = cache.get(state)
+        entry = cache.get(state, adjudicate)
         if entry is not None:
             return apply_entry(node, entry)
 
     # Check terminal
-    done, z = state.is_terminal()
+    done, z = state.is_terminal(adjudicate=adjudicate)
     if done:
         node.set_terminal(z)
         if cache is not None:
-            cache.put_terminal(state, z)
+            cache.put_terminal(state, z, adjudicate)
         return z
 
     # Get legal moves
@@ -151,7 +155,7 @@ def _expand(node: Node, evaluate: Callable, action_size: int,
 
     node.expand(legal, priors)
     if cache is not None:
-        cache.put_eval(state, legal, priors, value)
+        cache.put_eval(state, legal, priors, value, adjudicate)
 
     return value
 

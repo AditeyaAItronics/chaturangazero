@@ -53,7 +53,8 @@ def mcts_player(net, device, n_sims, action_size):
 
     def player(state):
         return int(np.argmax(search(state, evaluate, n_sims=n_sims,
-                                    action_size=action_size, add_noise=False)))
+                                    action_size=action_size, add_noise=False,
+                                    adjudicate=False)))
     return player
 
 
@@ -244,7 +245,7 @@ def cmd_game(args, device):
     while not state.is_terminal(adjudicate=False)[0]:
         if state.side_to_move == agent_side:
             visits, root = search(state, evaluate, n_sims=args.sims, action_size=action_size,
-                                  add_noise=False, return_root=True)
+                                  add_noise=False, return_root=True, adjudicate=False)
             action = int(np.argmax(visits))
             _, v = evaluate(state)
             top = np.argsort(visits)[::-1][:3]
