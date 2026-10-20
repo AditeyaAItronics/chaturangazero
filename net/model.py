@@ -13,7 +13,10 @@ Architecture per §3.3:
 
 CRITICAL: The policy head uses 1×1 convolution, NOT flatten-to-linear.
 A Linear(8192, 4096) layer would have ~34M parameters, dwarfing the 2.5M trunk.
-The 1×1 conv reads spatial position as the from-square and channel as the to-square.
+The (B, 64, 8, 8) output is flattened channel-major, so logit index
+c*64 + (r*8 + f) = action from_sq*64 + to_sq: the CHANNEL is the from-square
+and the spatial position (r, f) is the to-square. (Plan §3.3 describes the
+transpose; either assignment works, this is what the code does.)
 """
 
 import torch
@@ -60,6 +63,14 @@ class DualHeadNet(nn.Module):
         value_hidden: int = 256,
     ):
         super().__init__()
+        
+        # Saved into checkpoints so loaders can rebuild the exact architecture
+        self.config = dict(
+            input_planes=input_planes, board_h=board_h, board_w=board_w,
+            action_size=action_size, n_blocks=n_blocks, channels=channels,
+            policy_channels=policy_channels, value_channels=value_channels,
+            value_hidden=value_hidden,
+        )
         
         self.board_h = board_h
         self.board_w = board_w
@@ -177,3 +188,53 @@ def create_connect4_net(n_blocks: int = 3, channels: int = 64) -> DualHeadNet:
         value_channels=4,
         value_hidden=64,
     )
+
+
+# Board size implied by the input encoding, for checkpoints saved before
+# architecture configs were stored (Chaturanga: 14 planes, Connect-4: 3).
+_BOARD_FOR_PLANES = {14: (8, 8), 3: (6, 7)}
+
+
+def net_config_from_state_dict(state_dict: dict) -> dict:
+    """Infer DualHeadNet constructor arguments from a state_dict's weight shapes."""
+    input_planes = state_dict['input_conv.weight'].shape[1]
+    if input_planes not in _BOARD_FOR_PLANES:
+        raise ValueError(f"cannot infer board size for {input_planes} input planes")
+    board_h, board_w = _BOARD_FOR_PLANES[input_planes]
+    policy_channels = state_dict['policy_conv.weight'].shape[0]
+    if 'policy_fc.weight' in state_dict:
+        action_size = state_dict['policy_fc.weight'].shape[0]
+    else:
+        action_size = policy_channels * board_h * board_w
+    n_blocks = len({k.split('.')[1] for k in state_dict if k.startswith('res_blocks.')})
+    return dict(
+        input_planes=input_planes, board_h=board_h, board_w=board_w,
+        action_size=action_size, n_blocks=n_blocks,
+        channels=state_dict['input_conv.weight'].shape[0],
+        policy_channels=policy_channels,
+        value_channels=state_dict['value_conv.weight'].shape[0],
+        value_hidden=state_dict['value_fc1.weight'].shape[0],
+    )
+
+
+def load_net_from_checkpoint(path: str, device=None) -> tuple[DualHeadNet, dict]:
+    """
+    Rebuild the network a checkpoint was trained with and load its weights.
+
+    Uses the architecture stored in the checkpoint ('net_config'); older
+    checkpoints without it have the architecture inferred from weight shapes,
+    so a cloud (8x128) checkpoint loads just as well as a local (5x64) one.
+
+    Returns (net in eval mode on `device`, checkpoint dict).
+    """
+    from utils.device import get_device
+    device = get_device(device)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
+    config = checkpoint.get('net_config') if isinstance(checkpoint, dict) else None
+    if config is None:
+        config = net_config_from_state_dict(state_dict)
+    net = DualHeadNet(**config)
+    net.load_state_dict(state_dict)
+    net.to(device).eval()
+    return net, checkpoint

@@ -9,7 +9,7 @@ import numpy as np
 from .board import (
     State, WHITE, BLACK, EMPTY,
     PADATI, ASHVA, GAJA, RATHA, MANTRI, RAJA,
-    rank_of, file_of, sq, on_board, MOVE_CAP,
+    rank_of, file_of, sq, on_board, get_move_cap,
 )
 
 
@@ -23,135 +23,105 @@ def decode_action(action: int) -> tuple[int, int]:
     return action // 64, action % 64
 
 
-def _gen_padati_moves(board: np.ndarray, s: int, side: int, moves: list[int]):
-    """Generate Padati (pawn) moves. Forward one step, diagonal captures, auto-promote."""
+# --- Precomputed move tables (needtofix S4) ---------------------------------
+# For every square: the target squares of each leaper, and the four Ratha
+# rays, in the same direction order the original per-piece generators used —
+# so generate_moves() returns moves in exactly the same order as before
+# (MCTS breaks ties by that order).
+
+def _targets(deltas):
+    table = []
+    for s in range(64):
+        r, f = rank_of(s), file_of(s)
+        table.append(tuple(sq(r + dr, f + df) for dr, df in deltas if on_board(r + dr, f + df)))
+    return tuple(table)
+
+
+_ASHVA_TARGETS = _targets([(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)])
+_GAJA_TARGETS = _targets([(-2, -2), (-2, 2), (2, -2), (2, 2)])      # jumps: the middle square is irrelevant
+_MANTRI_TARGETS = _targets([(-1, -1), (-1, 1), (1, -1), (1, 1)])
+_RAJA_TARGETS = _targets([(dr, df) for dr in (-1, 0, 1) for df in (-1, 0, 1) if (dr, df) != (0, 0)])
+_LEAPER_TARGETS = {ASHVA: _ASHVA_TARGETS, GAJA: _GAJA_TARGETS,
+                   MANTRI: _MANTRI_TARGETS, RAJA: _RAJA_TARGETS}
+
+
+def _rays(s):
     r, f = rank_of(s), file_of(s)
-    forward = 1 if side == WHITE else -1
-    nr = r + forward
-    
-    if not (0 <= nr < 8):
-        return
-    
-    # Forward move (non-capture)
-    target_sq = sq(nr, f)
-    if board[target_sq] == EMPTY:
-        moves.append(encode_action(s, target_sq))
-    
-    # Diagonal captures
-    for df in (-1, 1):
-        nf = f + df
-        if 0 <= nf < 8:
-            target_sq = sq(nr, nf)
-            target_piece = board[target_sq]
-            # Can capture enemy pieces only
-            if target_piece != EMPTY and (target_piece > 0) != (side > 0):
-                moves.append(encode_action(s, target_sq))
-
-
-def _gen_ashva_moves(board: np.ndarray, s: int, side: int, moves: list[int]):
-    """Generate Ashva (knight) moves. Standard knight leap."""
-    r, f = rank_of(s), file_of(s)
-    for dr, df in [(-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)]:
-        nr, nf = r + dr, f + df
-        if on_board(nr, nf):
-            target_sq = sq(nr, nf)
-            target_piece = board[target_sq]
-            if target_piece == EMPTY or (target_piece > 0) != (side > 0):
-                moves.append(encode_action(s, target_sq))
-
-
-def _gen_gaja_moves(board: np.ndarray, s: int, side: int, moves: list[int]):
-    """Generate Gaja (elephant) moves. Exactly two squares diagonally, jumping."""
-    r, f = rank_of(s), file_of(s)
-    for dr, df in [(-2,-2),(-2,2),(2,-2),(2,2)]:
-        nr, nf = r + dr, f + df
-        if on_board(nr, nf):
-            target_sq = sq(nr, nf)
-            target_piece = board[target_sq]
-            if target_piece == EMPTY or (target_piece > 0) != (side > 0):
-                moves.append(encode_action(s, target_sq))
-
-
-def _gen_ratha_moves(board: np.ndarray, s: int, side: int, moves: list[int]):
-    """Generate Ratha (chariot/rook) moves. Sliding orthogonally."""
-    r, f = rank_of(s), file_of(s)
-    for dr, df in [(0,1),(0,-1),(1,0),(-1,0)]:
-        nr, nf = r + dr, f + df
+    rays = []
+    for dr, df in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+        ray, nr, nf = [], r + dr, f + df
         while on_board(nr, nf):
-            target_sq = sq(nr, nf)
-            target_piece = board[target_sq]
-            if target_piece == EMPTY:
-                moves.append(encode_action(s, target_sq))
-            else:
-                # Blocked: capture if enemy, then stop
-                if (target_piece > 0) != (side > 0):
-                    moves.append(encode_action(s, target_sq))
-                break
-            nr += dr
-            nf += df
+            ray.append(sq(nr, nf))
+            nr, nf = nr + dr, nf + df
+        rays.append(tuple(ray))
+    return tuple(rays)
 
 
-def _gen_mantri_moves(board: np.ndarray, s: int, side: int, moves: list[int]):
-    """Generate Mantri (minister) moves. One square diagonally."""
-    r, f = rank_of(s), file_of(s)
-    for dr, df in [(-1,-1),(-1,1),(1,-1),(1,1)]:
-        nr, nf = r + dr, f + df
-        if on_board(nr, nf):
-            target_sq = sq(nr, nf)
-            target_piece = board[target_sq]
-            if target_piece == EMPTY or (target_piece > 0) != (side > 0):
-                moves.append(encode_action(s, target_sq))
+_RATHA_RAYS = tuple(_rays(s) for s in range(64))
 
-
-def _gen_raja_moves(board: np.ndarray, s: int, side: int, moves: list[int]):
-    """
-    Generate Raja (king) moves. One square in any direction.
-    NO CHECK FILTERING. The Raja may legally step onto guarded squares.
-    """
-    r, f = rank_of(s), file_of(s)
-    for dr in (-1, 0, 1):
-        for df in (-1, 0, 1):
-            if dr == 0 and df == 0:
-                continue
-            nr, nf = r + dr, f + df
-            if on_board(nr, nf):
-                target_sq = sq(nr, nf)
-                target_piece = board[target_sq]
-                if target_piece == EMPTY or (target_piece > 0) != (side > 0):
-                    moves.append(encode_action(s, target_sq))
-
-
-# Dispatch table: piece_type -> generator function
-_GENERATORS = {
-    PADATI: _gen_padati_moves,
-    ASHVA: _gen_ashva_moves,
-    GAJA: _gen_gaja_moves,
-    RATHA: _gen_ratha_moves,
-    MANTRI: _gen_mantri_moves,
-    RAJA: _gen_raja_moves,
+# Padati: forward square (None off-board) and diagonal-capture squares (file -1, then +1)
+_PADATI_FORWARD = {
+    side: tuple(sq(rank_of(s) + side, file_of(s)) if 0 <= rank_of(s) + side < 8 else None
+                for s in range(64))
+    for side in (WHITE, BLACK)
+}
+_PADATI_CAPTURES = {
+    side: tuple(tuple(sq(rank_of(s) + side, file_of(s) + df) for df in (-1, 1)
+                      if on_board(rank_of(s) + side, file_of(s) + df))
+                for s in range(64))
+    for side in (WHITE, BLACK)
 }
 
 
 def generate_moves(state: State) -> list[int]:
     """
     Generate all pseudo-legal moves for the side to move.
-    
+
     PSEUDO-LEGAL == LEGAL in this ruleset (no check).
-    Returns a list of action IDs in [0, 4096).
+    Returns a list of action IDs in [0, 4096). The result is cached on the
+    State (S3); each call returns a fresh copy, so callers may modify it.
     """
-    board = state.board
+    cached = getattr(state, '_moves', None)
+    if cached is not None:
+        return list(cached)
+
+    board = state.board.tolist()          # plain ints: much faster than numpy scalars
     side = state.side_to_move
     moves: list[int] = []
-    
-    for s in range(64):
-        piece = board[s]
-        if piece == EMPTY:
+    append = moves.append
+
+    for s, piece in enumerate(board):
+        kind = piece * side               # > 0 only for the side to move's pieces
+        if kind <= 0:
             continue
-        # Check if piece belongs to the side to move
-        if (piece > 0 and side == WHITE) or (piece < 0 and side == BLACK):
-            piece_type = abs(piece)
-            _GENERATORS[piece_type](board, s, side, moves)
-    
+        base = s * 64
+        if kind == PADATI:
+            fwd = _PADATI_FORWARD[side][s]
+            if fwd is not None:
+                if board[fwd] == EMPTY:
+                    append(base + fwd)
+                for t in _PADATI_CAPTURES[side][s]:
+                    if board[t] * side < 0:            # captures enemy pieces only
+                        append(base + t)
+        elif kind == RATHA:
+            for ray in _RATHA_RAYS[s]:
+                for t in ray:
+                    target = board[t]
+                    if target == EMPTY:
+                        append(base + t)
+                        continue
+                    if target * side < 0:              # blocked: capture if enemy, then stop
+                        append(base + t)
+                    break
+        else:
+            # Ashva, Gaja, Mantri, Raja: empty or enemy-occupied target.
+            # NO CHECK FILTERING — the Raja may step onto guarded squares.
+            for t in _LEAPER_TARGETS[kind][s]:
+                if board[t] * side <= 0:
+                    append(base + t)
+
+    if hasattr(state, '_moves'):
+        state._moves = tuple(moves)
     return moves
 
 
@@ -163,6 +133,11 @@ def apply_move(state: State, action: int) -> 'State':
     - Normal moves and captures
     - Padati promotion to Mantri on last rank (forced, no choice)
     """
+    # §2.2 hard invariant: the move cap is the only termination guarantee, so a
+    # move from a position at the cap means something skipped is_terminal().
+    assert state.ply_count < get_move_cap(), \
+        "game exceeded cap — termination logic is broken"
+    
     from_sq, to_sq = decode_action(action)
     
     new_board = state.board.copy()
@@ -187,7 +162,9 @@ def apply_move(state: State, action: int) -> 'State':
     new_state._side = -state.side_to_move
     new_state._ply = state.ply_count + 1
     new_state._hash = None
-    
+    new_state._moves = None
+    new_state._terminal = None
+        
     return new_state
 
 
@@ -196,6 +173,5 @@ def legal_mask(state: State) -> np.ndarray:
     Return a boolean mask of shape (4096,) with True at legal action indices.
     """
     mask = np.zeros(4096, dtype=bool)
-    for action in generate_moves(state):
-        mask[action] = True
+    mask[generate_moves(state)] = True
     return mask

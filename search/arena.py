@@ -36,7 +36,8 @@ def play_game(
     move_history = []
     
     while True:
-        done, z = state.is_terminal()
+        # No material adjudication in arena games (§2.2): a capped game is a draw
+        done, z = state.is_terminal(adjudicate=False)
         if done:
             # z is from the current side-to-move's perspective
             # Convert to player1's perspective

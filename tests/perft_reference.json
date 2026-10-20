@@ -1,81 +1,261 @@
 {
-    "_comment": "Perft reference numbers — to be populated by differential testing.",
-    "_note": "Two independent implementations must agree exactly to depth 6 on all 15 positions.",
-    "positions": [
-        {
-            "name": "initial_position",
-            "description": "Standard Chaturanga starting position",
-            "expected": {"1": 16, "2": 256, "3": 4176, "4": 68133}
-        },
-        {
-            "name": "pawn_promotion",
-            "description": "White Padati one step from promotion on rank 7",
-            "expected": {}
-        },
-        {
-            "name": "bare_king",
-            "description": "One side has only their Raja, opponent has material",
-            "expected": {}
-        },
-        {
-            "name": "king_vs_king",
-            "description": "Both sides have only their Raja",
-            "expected": {}
-        },
-        {
-            "name": "stalemate",
-            "description": "Hand-built stalemate — the +1 terminal test",
-            "expected": {}
-        },
-        {
-            "name": "raja_on_guarded_square",
-            "description": "Raja's only moves are onto guarded squares",
-            "expected": {}
-        },
-        {
-            "name": "gaja_jump",
-            "description": "Gaja's only moves jump over occupied squares",
-            "expected": {}
-        },
-        {
-            "name": "elephant_orbits",
-            "description": "Elephants on all four orbit classes",
-            "expected": {}
-        },
-        {
-            "name": "lone_ratha_endgame",
-            "description": "Endgame with a lone Ratha and Rajas",
-            "expected": {}
-        },
-        {
-            "name": "complex_midgame_1",
-            "description": "A complex midgame position",
-            "expected": {}
-        },
-        {
-            "name": "complex_midgame_2",
-            "description": "Another complex midgame position",
-            "expected": {}
-        },
-        {
-            "name": "raja_capture_imminent",
-            "description": "Position where Raja capture is immediately available",
-            "expected": {}
-        },
-        {
-            "name": "all_pieces_present",
-            "description": "Both sides have all 16 pieces",
-            "expected": {}
-        },
-        {
-            "name": "padati_captures",
-            "description": "Multiple Padati diagonal capture opportunities",
-            "expected": {}
-        },
-        {
-            "name": "ratha_open_file",
-            "description": "Ratha on an open file with long-range moves",
-            "expected": {}
-        }
-    ]
+  "_comment": "Perft reference numbers, frozen by tools/perft_freeze.py. Production and reference engines agree exactly at every listed depth (\u00a72.3).",
+  "_semantics": "perft(s, 0) = 1; a terminal position at depth >= 1 counts 0. Positions are FENs: ranks 8->1, side to move, ply count.",
+  "positions": [
+    {
+      "name": "initial_position",
+      "description": "Standard Chaturanga starting position",
+      "fen": "rnbmkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBMKBNR w 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 16,
+        "2": 256,
+        "3": 4176,
+        "4": 68133,
+        "5": 1164969,
+        "6": 19932596
+      }
+    },
+    {
+      "name": "pawn_promotion",
+      "description": "White Padati on d7 and Black Padati on c2, each one step from promoting to Mantri",
+      "fen": "r5k1/3P4/8/8/8/8/2p5/4K2R w 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 15,
+        "2": 269,
+        "3": 4851,
+        "4": 86296,
+        "5": 1611972,
+        "6": 29097088
+      }
+    },
+    {
+      "name": "bare_king",
+      "description": "Black to move can capture White's last piece (Ratha takes the Ashva), leaving a bare king",
+      "fen": "1r5k/6p1/8/8/8/1N6/8/K7 b 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 14,
+        "2": 104,
+        "3": 1592,
+        "4": 15294,
+        "5": 241815,
+        "6": 2418681
+      }
+    },
+    {
+      "name": "king_vs_king",
+      "description": "Both sides have only their Raja: terminal draw at the root (rule 2 before rule 3)",
+      "fen": "8/8/5k2/8/3K4/8/8/8 w 0",
+      "root_terminal": {
+        "done": true,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      }
+    },
+    {
+      "name": "stalemate",
+      "description": "White to move has no legal move: terminal WIN for White (+1), the sign trap",
+      "fen": "7k/8/8/3p4/3P4/p1pP4/PBP5/KB6 w 0",
+      "root_terminal": {
+        "done": true,
+        "z": 1.0
+      },
+      "expected": {
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      }
+    },
+    {
+      "name": "raja_on_guarded_square",
+      "description": "White Raja's only moves are onto squares Black guards; they must generate as legal",
+      "fen": "1r2k3/8/8/7p/7P/8/7r/K7 w 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 3,
+        "2": 73,
+        "3": 390,
+        "4": 10448,
+        "5": 56675,
+        "6": 1561645
+      }
+    },
+    {
+      "name": "gaja_jump",
+      "description": "White Gaja on c1 can only move by jumping over occupied b2 and d2",
+      "fen": "7k/p7/8/8/8/8/1P1p4/2B4K w 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 6,
+        "2": 34,
+        "3": 260,
+        "4": 1903,
+        "5": 15705,
+        "6": 129249
+      }
+    },
+    {
+      "name": "elephant_orbits",
+      "description": "Gajas on all four file/rank-parity classes for both sides; orbits never interact",
+      "fen": "2b1kb2/8/8/8/8/8/BB6/BB2K3 w 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 9,
+        "2": 72,
+        "3": 808,
+        "4": 7973,
+        "5": 96290,
+        "6": 1015394
+      }
+    },
+    {
+      "name": "lone_ratha_endgame",
+      "description": "Endgame: White Raja and lone Ratha against Black Raja and one Padati",
+      "fen": "4k3/7p/8/8/8/8/8/R3K3 w 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 15,
+        "2": 90,
+        "3": 1619,
+        "4": 12063,
+        "5": 225914,
+        "6": 1715011
+      }
+    },
+    {
+      "name": "complex_midgame_1",
+      "description": "Midgame after 20 random plies from the start (seed 11)",
+      "fen": "rn1mkb2/pp2Bppr/b1pp1n1p/8/8/1P2P1PP/P1PP1P1R/RN1MKBN1 w 20",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 19,
+        "2": 362,
+        "3": 7132,
+        "4": 140647,
+        "5": 2876798,
+        "6": 59287534
+      }
+    },
+    {
+      "name": "complex_midgame_2",
+      "description": "Midgame after 30 random plies from the start (seed 23)",
+      "fen": "r2mkbnr/2ppp1pp/pp6/NB1n1Np1/6b1/PP5P/2PPPPP1/R2MK2R w 30",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 29,
+        "2": 641,
+        "3": 17847,
+        "4": 406906,
+        "5": 11078965,
+        "6": 258776099
+      }
+    },
+    {
+      "name": "raja_capture_imminent",
+      "description": "White Ratha on e2 can capture the Black Raja on e7 immediately",
+      "fen": "8/p3k3/8/8/8/8/4R3/K7 w 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 16,
+        "2": 135,
+        "3": 2253,
+        "4": 17643,
+        "5": 298305,
+        "6": 2404685
+      }
+    },
+    {
+      "name": "all_pieces_present",
+      "description": "All 32 pieces on the board after 1. e3 f6 2. Nc3 Nc6 (no captures)",
+      "fen": "r1bmkbnr/ppppp1pp/2n2p2/8/8/2N1P3/PPPP1PPP/R1BMKBNR w 4",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 22,
+        "2": 418,
+        "3": 9102,
+        "4": 179847,
+        "5": 3959061,
+        "6": 80508888
+      }
+    },
+    {
+      "name": "padati_captures",
+      "description": "Several Padati diagonal-capture choices for both sides",
+      "fen": "4k3/8/8/1p1p1p1p/2P1P1P1/8/8/4K3 w 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 14,
+        "2": 182,
+        "3": 2149,
+        "4": 25604,
+        "5": 285551,
+        "6": 3293722
+      }
+    },
+    {
+      "name": "ratha_open_file",
+      "description": "Rathas facing each other on the open d-file",
+      "fen": "3rk3/ppp2ppp/8/8/8/8/PPP2PPP/3RK3 w 0",
+      "root_terminal": {
+        "done": false,
+        "z": 0.0
+      },
+      "expected": {
+        "1": 19,
+        "2": 331,
+        "3": 6019,
+        "4": 106780,
+        "5": 1971021,
+        "6": 36111098
+      }
+    }
+  ]
 }

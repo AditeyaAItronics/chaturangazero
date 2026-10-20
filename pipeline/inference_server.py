@@ -18,7 +18,8 @@ import torch.nn.functional as F
 from typing import Callable, Optional, Type
 
 from search.node import Node
-from search.mcts import _select_action, _backup, select_action_with_temperature
+from search.mcts import _select_edge, _backup, select_action_with_temperature
+from search.cache import EvalCache, apply_entry
 from net.replay import ReplayBuffer
 from utils.device import get_device, use_amp
 
@@ -110,6 +111,10 @@ def run_batched_self_play(
     device=None,
     amp: bool = True,
     buffer: Optional[ReplayBuffer] = None,
+    reuse_subtree: bool = True,
+    leaves_per_step: int = 1,
+    virtual_loss: float = 3.0,
+    eval_cache_size: int = 50_000,
 ) -> dict:
     """
     Generate self-play games using parallel-games batched MCTS.
@@ -128,6 +133,14 @@ def run_batched_self_play(
         device: 'auto', 'cpu', 'cuda', 'cuda:N' or None (auto-detect).
         amp: Whether to use FP16 automatic mixed precision.
         buffer: Optional ReplayBuffer to add training examples directly.
+        reuse_subtree: keep the chosen child's subtree as the next root (config mcts.reuse_subtree).
+        leaves_per_step: leaves each game contributes to one network batch. With
+            more than 1, virtual loss steers the extra descents onto different
+            branches; the batch grows to games x leaves_per_step, which keeps the
+            GPU fed when few games remain. 1 reproduces plain sequential MCTS.
+        virtual_loss: visits-worth of temporary loss applied along a pending path.
+        eval_cache_size: entries in the shared evaluation cache (transposition
+            table); 0 disables it.
         
     Returns:
         dict of run statistics (games, wins, losses, draws, mean_length, elapsed_time).
@@ -147,94 +160,78 @@ def run_batched_self_play(
         'game_lengths': [],
         'terminal_reasons': {},
         'samples_generated': 0,
+        'raja_capture_chances': 0,   # moves where a Raja capture was legal
+        'raja_captures_missed': 0,   # ...and a different move was played
+        'virtual_loss_collisions': 0,
     }
+    cache = EvalCache(eval_cache_size) if eval_cache_size > 0 else None
+    leaves_per_step = max(1, int(leaves_per_step))
+    n_steps = -(-n_sims // leaves_per_step)   # ceil: total simulations per move stay n_sims
 
     start_time = time.time()
 
-    # Initialize roots and run initial expansion for active slots
-    _expand_and_init_roots(slots, evaluator, action_size, dirichlet_alpha, dirichlet_eps)
+    # Initialize roots: one batched evaluation for all slots
+    for slot in slots:
+        slot.root = Node(slot.state, action_size=action_size)
+    _expand_roots([slot.root for slot in slots], evaluator, cache)
+    for slot in slots:
+        slot.root.add_root_noise(dirichlet_alpha, dirichlet_eps)
 
     while games_completed < total_games:
-        # 1. Run n_sims simulations across all currently active slots in lockstep
-        for _ in range(n_sims):
-            # A. SELECT: Traverse tree for each active slot until an unexpanded/terminal leaf is found
-            leaves = []
-            eval_needed_indices = []
-            eval_states = []
+        # 1. Run n_sims simulations per game, in lockstep across games.
+        #    Each step: every active game descends up to `leaves_per_step` times
+        #    (virtual loss on pending paths), then ONE batched forward pass
+        #    evaluates all new leaves from all games.
+        sims_left = {i: n_sims for i, slot in enumerate(slots) if not slot.done}
+        for _ in range(n_steps):
+            pending = []          # (slot_idx, leaf, path)
+            pending_ids = set()
 
             for i, slot in enumerate(slots):
-                if slot.done:
-                    leaves.append(None)
+                if slot.done or sims_left.get(i, 0) <= 0:
                     continue
+                for _ in range(min(leaves_per_step, sims_left[i])):
+                    leaf, path = _descend(slot.root, c_puct, virtual_loss, action_size)
 
-                node = slot.root
-                while node.is_expanded and not node.is_terminal:
-                    action = _select_action(node, c_puct)
-                    if action in node.children:
-                        node = node.children[action]
+                    if id(leaf) in pending_ids:
+                        # Two descents reached the same unevaluated leaf: undo and skip
+                        _revert_virtual_loss(path, virtual_loss)
+                        stats['virtual_loss_collisions'] += 1
+                        continue
+                    sims_left[i] -= 1
+
+                    value = _try_expand_without_network(leaf, cache)
+                    if value is not None:
+                        # Terminal or cache hit: back up immediately, no GPU needed
+                        _revert_virtual_loss(path, virtual_loss)
+                        _backup(leaf, value)
                     else:
-                        # Create child
-                        child_state = slot.state_cls.apply(node.state, action) if hasattr(slot.state_cls, 'apply') and not hasattr(node.state, 'apply') else node.state.apply(action)
-                        child = Node(child_state, parent=node, parent_action=action, action_size=action_size)
-                        node.children[action] = child
-                        node = child
-                        break
+                        pending.append((i, leaf, path))
+                        pending_ids.add(id(leaf))
 
-                leaves.append(node)
+            if not pending:
+                continue
 
-                # Check if this leaf needs neural network evaluation
-                if not node.is_expanded and not node.is_terminal:
-                    done, z = node.state.is_terminal()
-                    if done:
-                        node.is_terminal = True
-                        node.terminal_value = z
-                        node.is_expanded = True
-                    else:
-                        eval_needed_indices.append(i)
-                        eval_states.append(node.state)
+            # B. BATCHED EVALUATION: one forward pass for every pending leaf of every game
+            batch_policies, batch_values = evaluator.evaluate_batch([leaf.state for _, leaf, _ in pending])
 
-            # B. BATCHED EVALUATION: Send all non-terminal leaves to GPU in one forward pass
-            if eval_states:
-                batch_policies, batch_values = evaluator.evaluate_batch(eval_states)
-                for k, slot_idx in enumerate(eval_needed_indices):
-                    leaf = leaves[slot_idx]
-                    p = batch_policies[k]
-                    v = batch_values[k]
-
-                    # Legal move masking
-                    legal = leaf.state.legal_moves()
-                    leaf.legal_actions = legal
-                    if not legal:
-                        leaf.is_terminal = True
-                        leaf.terminal_value = 1.0  # Stalemate = win
-                        leaf.is_expanded = True
-                    else:
-                        mask = np.zeros(action_size, dtype=bool)
-                        for a in legal:
-                            mask[a] = True
-                        p = p * mask
-                        psum = np.sum(p)
-                        if psum > 0:
-                            leaf.P[:] = p / psum
-                        else:
-                            leaf.P[:] = mask.astype(np.float32) / len(legal)
-                        leaf.is_expanded = True
-
-            # C. BACKUP: Propagate values back up the tree for each active slot
-            eval_map = {slot_idx: k for k, slot_idx in enumerate(eval_needed_indices)}
-            for i, slot in enumerate(slots):
-                if slot.done or leaves[i] is None:
-                    continue
-                leaf = leaves[i]
-                if leaf.is_terminal:
-                    val = leaf.terminal_value
-                elif i in eval_map:
-                    val = float(batch_values[eval_map[i]])
+            # C. EXPAND + BACKUP
+            for k, (slot_idx, leaf, path) in enumerate(pending):
+                value = float(batch_values[k])
+                legal = leaf.state.legal_moves()
+                if not legal:   # unreachable: is_terminal() already caught stalemate
+                    leaf.set_terminal(1.0)
+                    value = 1.0
                 else:
-                    val = 0.0
-                _backup(leaf, val)
+                    priors = _normalised_priors(batch_policies[k], legal)
+                    leaf.expand(legal, priors)
+                    if cache is not None:
+                        cache.put_eval(leaf.state, legal, priors, value)
+                _revert_virtual_loss(path, virtual_loss)
+                _backup(leaf, value)
 
         # 2. SELECT MOVES for each active slot
+        new_roots = []    # roots that still need expanding, done in one batch below
         for i, slot in enumerate(slots):
             if slot.done:
                 continue
@@ -242,13 +239,21 @@ def run_batched_self_play(
             # Visit counts from root
             visit_dist = slot.root.visit_distribution()
             temp = 1.0 if slot.state.ply_count < temp_threshold else 0.0
-            action, pi = select_action_with_temperature(
-                visit_dist, temp, slot.state.legal_moves()
-            )
+            legal_now = slot.state.legal_moves()
+            action, pi = select_action_with_temperature(visit_dist, temp, legal_now)
 
-            # Record trajectory step — π stored in the same canonical frame as the encoding
+            # Diagnostic (§2.1): was a free Raja capture on the board, and missed?
+            raja_captures = _raja_capture_actions(slot.state, legal_now)
+            if raja_captures:
+                stats['raja_capture_chances'] += 1
+                if action not in raja_captures:
+                    stats['raja_captures_missed'] += 1
+
+            # Record trajectory step — π and legal moves in the same canonical frame as the encoding
             encoded = slot.state.encode()
-            slot.history.append((encoded, slot.state.orient_policy(pi), slot.state.side_to_move))
+            legal_canonical = np.flatnonzero(slot.state.orient_policy(slot.state.legal_mask()))
+            slot.history.append((encoded, slot.state.orient_policy(pi), slot.state.side_to_move,
+                                 legal_canonical))
 
             # Apply move
             slot.state = slot.state.apply(action)
@@ -278,13 +283,8 @@ def run_batched_self_play(
                 elif winner == -1:
                     stats['p2_wins'] += 1
 
-                reason = getattr(slot.state, 'terminal_reason', None)
-                if reason is None:
-                    if hasattr(slot.state, '_check_win'):
-                        reason = 'board_full' if slot.state.ply_count >= 42 else 'four_in_a_row'
-                    else:
-                        from pipeline.selfplay import _classify_terminal
-                        reason = _classify_terminal(slot.state, z)
+                from pipeline.selfplay import _classify_terminal
+                reason = _classify_terminal(slot.state, z)
                 stats['terminal_reasons'][reason] = stats['terminal_reasons'].get(reason, 0) + 1
 
                 step_interval = max(10, total_games // 4)
@@ -296,143 +296,250 @@ def run_batched_self_play(
 
                 # Flush game positions to replay buffer
                 if buffer is not None:
-                    for s_enc, pi_dist, side in slot.history:
+                    for s_enc, pi_dist, side, legal_canonical in slot.history:
                         # Target value: +1 if this side won, -1 if lost, 0 if draw
                         target_v = float(winner * side) if winner != 0 else 0.0
                         # Mirror augmentation happens in ReplayBuffer.sample()
-                        buffer.add(s_enc, pi_dist, target_v)
+                        buffer.add(s_enc, pi_dist, target_v, legal=legal_canonical)
                         stats['samples_generated'] += 1
 
                 # If we still have games left to start, reset this slot
                 if games_started < total_games:
                     slot.reset()
                     games_started += 1
-                    _init_single_slot_root(slot, evaluator, action_size, dirichlet_alpha, dirichlet_eps)
+                    slot.root = Node(slot.state, action_size=action_size)
+                    new_roots.append(slot.root)
                 else:
                     slot.root = None
             else:
                 # Subtree reuse: advance root to chosen child
-                if action in slot.root.children:
-                    slot.root = slot.root.children[action]
+                child = slot.root.children.get(action) if reuse_subtree else None
+                if child is not None and child.is_expanded:
+                    slot.root = child
                     slot.root.parent = None
                     slot.root.parent_action = -1
+                    slot.root.parent_edge = -1
                 else:
                     slot.root = Node(slot.state, action_size=action_size)
-                    _expand_single_node(slot.root, evaluator, action_size)
+                    new_roots.append(slot.root)
 
-                # Add exploration noise at new root
-                if slot.root.legal_actions:
-                    noise = np.random.dirichlet([dirichlet_alpha] * len(slot.root.legal_actions))
-                    for k, a in enumerate(slot.root.legal_actions):
-                        slot.root.P[a] = (1 - dirichlet_eps) * slot.root.P[a] + dirichlet_eps * noise[k]
+        # Expand every new root in one batched forward pass (S5), then add
+        # exploration noise to every active root (new or reused)
+        _expand_roots(new_roots, evaluator, cache)
+        for slot in slots:
+            if not slot.done and slot.root is not None:
+                slot.root.add_root_noise(dirichlet_alpha, dirichlet_eps)
 
     elapsed = time.time() - start_time
     stats['elapsed_seconds'] = elapsed
     stats['games_per_second'] = stats['games'] / max(elapsed, 1e-5)
     stats['mean_length'] = float(np.mean(stats['game_lengths'])) if stats['game_lengths'] else 0.0
+    stats['draw_rate'] = stats['draws'] / max(stats['games'], 1)
+    stats['raja_capture_miss_rate'] = (stats['raja_captures_missed'] / stats['raja_capture_chances']
+                                       if stats['raja_capture_chances'] else 0.0)
+    if cache is not None:
+        stats.update(cache.stats())
 
     return stats
 
 
-def _expand_and_init_roots(slots, evaluator, action_size, alpha, eps):
-    """Batch-evaluates and initializes the roots for all initial slots."""
-    states_to_eval = []
-    active_indices = []
-
-    for i, slot in enumerate(slots):
-        slot.root = Node(slot.state, action_size=action_size)
-        done, z = slot.state.is_terminal()
-        if done:
-            slot.root.is_terminal = True
-            slot.root.terminal_value = z
-            slot.root.is_expanded = True
-        else:
-            states_to_eval.append(slot.state)
-            active_indices.append(i)
-
-    if states_to_eval:
-        policies, values = evaluator.evaluate_batch(states_to_eval)
-        for k, slot_idx in enumerate(active_indices):
-            slot = slots[slot_idx]
-            legal = slot.state.legal_moves()
-            slot.root.legal_actions = legal
-            if not legal:
-                slot.root.is_terminal = True
-                slot.root.terminal_value = 1.0
-                slot.root.is_expanded = True
-                continue
-
-            p = policies[k]
-            mask = np.zeros(action_size, dtype=bool)
-            for a in legal:
-                mask[a] = True
-            p = p * mask
-            psum = np.sum(p)
-            p = p / psum if psum > 0 else mask.astype(np.float32) / len(legal)
-
-            # Dirichlet noise at root
-            noise = np.random.dirichlet([alpha] * len(legal))
-            for idx_a, a in enumerate(legal):
-                slot.root.P[a] = (1 - eps) * p[a] + eps * noise[idx_a]
-            slot.root.is_expanded = True
+def _descend(root: Node, c_puct: float, virtual_loss: float, action_size: int):
+    """
+    PUCT descent from the root to a leaf, applying virtual loss to every edge on
+    the way: each traversed edge looks `virtual_loss` visits worse (a loss for
+    the player choosing it) until the leaf's real value is backed up.
+    Returns (leaf, path) where path is the list of (node, edge index) pairs.
+    """
+    node = root
+    path = []
+    while node.is_expanded and not node.is_terminal:
+        edge = _select_edge(node, c_puct)
+        if virtual_loss:
+            node.N[edge] += virtual_loss
+            node.W[edge] -= virtual_loss
+        path.append((node, edge))
+        action = node.legal_actions[edge]
+        child = node.children.get(action)
+        if child is None:
+            child = Node(node.state.apply(action), parent=node, parent_action=action,
+                         action_size=action_size, parent_edge=edge)
+            node.children[action] = child
+            return child, path
+        node = child
+    return node, path
 
 
-def _init_single_slot_root(slot, evaluator, action_size, alpha, eps):
-    """Initializes a new root when a slot is recycled."""
-    slot.root = Node(slot.state, action_size=action_size)
-    done, z = slot.state.is_terminal()
+def _revert_virtual_loss(path, virtual_loss: float):
+    if not virtual_loss:
+        return
+    for node, edge in path:
+        node.N[edge] -= virtual_loss
+        node.W[edge] += virtual_loss
+
+
+def _try_expand_without_network(leaf: Node, cache: Optional[EvalCache]) -> Optional[float]:
+    """
+    Resolve a leaf without the network if possible: an already-terminal node,
+    a cache hit, or a new terminal position. Returns its value (side to move),
+    or None if the network must evaluate it.
+    """
+    if leaf.is_terminal:
+        return leaf.terminal_value
+    if cache is not None:
+        entry = cache.get(leaf.state)
+        if entry is not None:
+            return apply_entry(leaf, entry)
+    done, z = leaf.state.is_terminal()
     if done:
-        slot.root.is_terminal = True
-        slot.root.terminal_value = z
-        slot.root.is_expanded = True
+        leaf.set_terminal(z)
+        if cache is not None:
+            cache.put_terminal(leaf.state, z)
+        return z
+    return None
+
+
+def _raja_capture_actions(state, legal: list[int]) -> set:
+    """Legal moves that capture the opponent's Raja (Chaturanga only)."""
+    board = getattr(state, 'board', None)
+    if board is None or getattr(board, 'ndim', 0) != 1:
+        return set()
+    from chaturanga.board import RAJA
+    enemy_raja = -RAJA * state.side_to_move
+    return {a for a in legal if board[a % 64] == enemy_raja}
+
+
+def _normalised_priors(policy: np.ndarray, legal: list[int]) -> np.ndarray:
+    """Network policy restricted to the legal moves and renormalised (uniform if all zero)."""
+    priors = np.asarray(policy, dtype=np.float64)[legal]
+    total = priors.sum()
+    if total > 0:
+        return priors / total
+    return np.full(len(legal), 1.0 / len(legal))
+
+
+def _expand_roots(nodes: list, evaluator, cache: Optional[EvalCache]) -> None:
+    """
+    Expand a list of fresh root nodes with ONE batched forward pass (S5):
+    cache hits and terminal roots need no network call at all.
+    """
+    pending = []
+    for node in nodes:
+        if _try_expand_without_network(node, cache) is None:
+            pending.append(node)
+    if not pending:
         return
-
-    policies, _ = evaluator.evaluate_batch([slot.state])
-    p = policies[0]
-    legal = slot.state.legal_moves()
-    slot.root.legal_actions = legal
-    if not legal:
-        slot.root.is_terminal = True
-        slot.root.terminal_value = 1.0
-        slot.root.is_expanded = True
-        return
-
-    mask = np.zeros(action_size, dtype=bool)
-    for a in legal:
-        mask[a] = True
-    p = p * mask
-    psum = np.sum(p)
-    p = p / psum if psum > 0 else mask.astype(np.float32) / len(legal)
-
-    noise = np.random.dirichlet([alpha] * len(legal))
-    for idx_a, a in enumerate(legal):
-        slot.root.P[a] = (1 - eps) * p[a] + eps * noise[idx_a]
-    slot.root.is_expanded = True
+    policies, values = evaluator.evaluate_batch([node.state for node in pending])
+    for k, node in enumerate(pending):
+        legal = node.state.legal_moves()
+        if not legal:   # unreachable: is_terminal() already caught stalemate
+            node.set_terminal(1.0)
+            continue
+        priors = _normalised_priors(policies[k], legal)
+        node.expand(legal, priors)
+        if cache is not None:
+            cache.put_eval(node.state, legal, priors, float(values[k]))
 
 
-def _expand_single_node(node, evaluator, action_size):
-    """Expands a single node."""
-    done, z = node.state.is_terminal()
-    if done:
-        node.is_terminal = True
-        node.terminal_value = z
-        node.is_expanded = True
-        return
+def run_batched_arena(
+    net_a: torch.nn.Module,
+    net_b: torch.nn.Module,
+    create_state: Callable,
+    n_games: int,
+    n_sims: int,
+    action_size: int = 4096,
+    c_puct: float = 1.5,
+    device=None,
+    amp: bool = True,
+    opening_plies: int = 0,
+    eval_cache_size: int = 50_000,
+    verbose: bool = False,
+    n_sims_b: Optional[int] = None,
+) -> dict:
+    """
+    Arena between two networks with every game played concurrently (needtofix S6).
 
-    policies, _ = evaluator.evaluate_batch([node.state])
-    p = policies[0]
-    legal = node.state.legal_moves()
-    node.legal_actions = legal
-    if not legal:
-        node.is_terminal = True
-        node.terminal_value = 1.0
-        node.is_expanded = True
-        return
+    `n_sims` is net_a's search budget per move; `n_sims_b` is net_b's
+    (default: the same). Different budgets with the SAME weights give the
+    plan's sims-vs-strength ablation.
 
-    mask = np.zeros(action_size, dtype=bool)
-    for a in legal:
-        mask[a] = True
-    p = p * mask
-    psum = np.sum(p)
-    node.P[:] = p / psum if psum > 0 else mask.astype(np.float32) / len(legal)
-    node.is_expanded = True
+    Same match rules as search.arena.arena(): games come in pairs that share a
+    random opening of `opening_plies` plies, once with each network moving
+    first; moves are the argmax of MCTS visit counts with no root noise; a
+    move-cap ending is a draw (no adjudication, §2.2). Each move builds a fresh
+    tree owned by the network to move; all leaves of all games are evaluated
+    with one forward pass per network per simulation step.
+
+    Returns the same dict as arena(), from net_a's point of view
+    ('p1_*' = net_a).
+    """
+    from search.arena import random_opening
+
+    evaluators = (BatchedEvaluator(net_a, device=device, amp=amp),
+                  BatchedEvaluator(net_b, device=device, amp=amp))
+    caches = tuple(EvalCache(eval_cache_size) if eval_cache_size > 0 else None for _ in range(2))
+
+    # games[g] = [state, side played by net_a, done, result for net_a]
+    games = []
+    opening = None
+    for g in range(n_games):
+        if g % 2 == 0 or opening is None:
+            opening = random_opening(create_state, opening_plies)
+        a_side = opening.side_to_move if g % 2 == 0 else -opening.side_to_move
+        games.append([opening, a_side, False, 0.0])
+
+    def player_of(game) -> int:
+        return 0 if game[0].side_to_move == game[1] else 1
+
+    while not all(g[2] for g in games):
+        active = [g for g in games if not g[2]]
+        roots = [Node(g[0], action_size=action_size) for g in active]
+        owners = [player_of(g) for g in active]
+        for p in (0, 1):
+            _expand_roots([r for r, o in zip(roots, owners) if o == p], evaluators[p], caches[p])
+
+        budgets = (n_sims, n_sims if n_sims_b is None else n_sims_b)
+        for step in range(max(budgets)):
+            pending = ([], [])        # per player: (leaf, path)
+            for root, owner in zip(roots, owners):
+                if step >= budgets[owner]:
+                    continue
+                leaf, path = _descend(root, c_puct, 0.0, action_size)
+                value = _try_expand_without_network(leaf, caches[owner])
+                if value is not None:
+                    _backup(leaf, value)
+                else:
+                    pending[owner].append(leaf)
+            for p in (0, 1):
+                if not pending[p]:
+                    continue
+                policies, values = evaluators[p].evaluate_batch([leaf.state for leaf in pending[p]])
+                for k, leaf in enumerate(pending[p]):
+                    legal = leaf.state.legal_moves()
+                    priors = _normalised_priors(policies[k], legal)
+                    leaf.expand(legal, priors)
+                    if caches[p] is not None:
+                        caches[p].put_eval(leaf.state, legal, priors, float(values[k]))
+                    _backup(leaf, float(values[k]))
+
+        for game, root in zip(active, roots):
+            action = int(np.argmax(root.visit_distribution()))
+            game[0] = game[0].apply(action)
+            done, z = game[0].is_terminal(adjudicate=False)
+            if done:
+                # z is for the side to move; convert to net_a's point of view
+                game[2] = True
+                game[3] = z if game[0].side_to_move == game[1] else -z
+
+    results = [g[3] for g in games]
+    a_wins = sum(1 for r in results if r > 0)
+    b_wins = sum(1 for r in results if r < 0)
+    draws = len(results) - a_wins - b_wins
+    if verbose:
+        print(f"  [Arena] {n_games} games: A {a_wins}W - {draws}D - {b_wins}L B", flush=True)
+    return {
+        'p1_wins': a_wins,
+        'p2_wins': b_wins,
+        'draws': draws,
+        'p1_win_rate': (a_wins + 0.5 * draws) / max(n_games, 1),
+        'results': results,
+    }

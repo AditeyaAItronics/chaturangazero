@@ -123,68 +123,37 @@ def test_terminal_bare_king():
 def test_terminal_stalemate_wins():
     """
     THE SIGN TRAP: Stalemate should return z = +1 for the stalemated player.
-    
-    This is a hand-built position where the side to move has no legal moves.
-    All 8 Raja neighbors are occupied by own pieces, each itself blocked.
+
+    Hand-built position: White to move has no legal move at all.
+        White: Raja a1, Gaja b1, Gaja b2, Padati a2 c2 d3 d4
+        Black: Padati a3 c3 d5, Raja h8
+    - a2, c2, d4 are blocked by the Black pawns directly ahead; their
+      diagonal-forward squares hold no enemy piece, so no captures.
+    - d3 is blocked by White's own d4.
+    - Gaja b1 can only reach d3 and Gaja b2 can only reach d4: both own pieces.
+    - Raja a1's neighbours a2, b1, b2 are all White's own pieces.
     """
-    # This is extremely hard to construct. Let's use a simpler approach:
-    # A position where the only piece is a Padati on the last rank
-    # that has already promoted, leaving a position with no moves.
-    # Actually, let's just make a position with a stuck Raja:
-    
     board = np.zeros(64, dtype=np.int8)
-    # White: Raja in corner, surrounded by own pawns, each blocked
-    board[sq(0, 0)] = RAJA     # a1
-    board[sq(0, 1)] = PADATI   # b1 — pawn, but can it move? b2 must be blocked
-    board[sq(1, 0)] = PADATI   # a2 — pawn, can it move to a3? if a3 is blocked...
-    board[sq(1, 1)] = PADATI   # b2 — blocking b1 pawn
-    
-    # Block a2 pawn: put something at a3
-    board[sq(2, 0)] = PADATI   # a3 — blocks a2
-    board[sq(2, 1)] = PADATI   # b3 — blocks b2 pawn's forward, and b1 pawn diag
-    board[sq(3, 0)] = PADATI   # a4 — blocks a3
-    board[sq(3, 1)] = PADATI   # b4 — blocks b3
-    board[sq(4, 0)] = PADATI   # a5 — blocks a4
-    board[sq(4, 1)] = PADATI   # b5 — blocks b4
-    board[sq(5, 0)] = PADATI   # a6 — blocks a5
-    board[sq(5, 1)] = PADATI   # b6 — blocks b5
-    board[sq(6, 0)] = PADATI   # a7 — blocks a6
-    board[sq(6, 1)] = PADATI   # b7 — blocks b6
-    
-    # Black raja somewhere far
-    board[sq(7, 7)] = -RAJA    # h8
-    board[sq(7, 6)] = -RATHA   # g8
-    
+    board[sq(0, 0)] = RAJA      # a1
+    board[sq(0, 1)] = GAJA      # b1
+    board[sq(1, 1)] = GAJA      # b2
+    board[sq(1, 0)] = PADATI    # a2
+    board[sq(1, 2)] = PADATI    # c2
+    board[sq(2, 3)] = PADATI    # d3
+    board[sq(3, 3)] = PADATI    # d4
+    board[sq(2, 0)] = -PADATI   # a3
+    board[sq(2, 2)] = -PADATI   # c3
+    board[sq(4, 3)] = -PADATI   # d5
+    board[sq(7, 7)] = -RAJA     # h8
+
     state = State(board=board, side_to_move=WHITE)
     moves = generate_moves(state)
-    
-    # We need to verify White truly has no moves. The a7 and b7 pawns can
-    # promote by moving to rank 7 (a8/b8). Let's check:
-    if len(moves) == 0:
-        done, z = is_terminal(state)
-        assert done == True, "No legal moves should be terminal"
-        assert z == 1.0, f"Stalemate should be WIN (z=+1), got z={z}"
-        print("  PASS: stalemate returns +1")
-    else:
-        # The position isn't actually stalemate, construct a different one
-        # Use a truly stuck position: all own pieces jammed
-        print(f"  NOTE: position has {len(moves)} moves, not stalemate.")
-        print("  Testing stalemate sign with forced check...")
-        
-        # Alternative: directly test the terminal function behavior
-        # by creating a state where generate_moves returns []
-        # The cleanest test: a board where only the Raja exists,
-        # fully surrounded by own Rathas blocking each other
-        board2 = np.zeros(64, dtype=np.int8)
-        board2[sq(0, 0)] = RAJA  # Corner raja
-        # Friendly pieces blocking all exits
-        board2[sq(0, 1)] = RATHA  # But ratha can slide! This won't work.
-        
-        # The real answer: it's basically impossible to construct a natural
-        # stalemate position, which is exactly what the plan says.
-        # Just verify the terminal function handles it correctly by
-        # checking the code path directly.
-        print("  PASS: stalemate is extremely rare, terminal code reviewed")
+    assert moves == [], f"position must be a true stalemate, but White has moves {moves}"
+
+    done, z = is_terminal(state)
+    assert done, "No legal moves must be terminal"
+    assert z == 1.0, f"Stalemate must be a WIN for the stalemated player (z=+1), got z={z}"
+    print("  PASS: stalemate returns +1")
 
 
 def test_terminal_order():
@@ -301,8 +270,8 @@ def test_random_playout_terminates():
             all_terminated = False
             print(f"  FAIL: game {game_idx} did not terminate in 350 plies")
     
-    if all_terminated:
-        print("  PASS: all 10 random games terminated")
+    assert all_terminated, "a random playout ran past the move cap without terminating"
+    print("  PASS: all 10 random games terminated")
 
 
 def test_differential_movegen():

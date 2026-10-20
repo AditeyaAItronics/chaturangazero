@@ -16,7 +16,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from connect4.game import Connect4State, ROWS, COLS
-from net.model import create_connect4_net
+from net.model import create_connect4_net, load_net_from_checkpoint
 from net.train import create_evaluator
 from search.mcts import search, select_action_with_temperature
 from utils.device import get_device, describe_device, add_device_argument
@@ -67,16 +67,12 @@ def main():
                 model_path = cp
                 break
 
-    net = create_connect4_net(n_blocks=3, channels=64).to(device)
     if model_path and os.path.exists(model_path):
         print(f"Loading trained weights from {model_path}...")
-        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            net.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            net.load_state_dict(checkpoint)
+        net, _ = load_net_from_checkpoint(model_path, device=device)
         print("Model loaded successfully!")
     else:
+        net = create_connect4_net(n_blocks=3, channels=64).to(device)
         print("No checkpoint found. Playing against an untrained baseline network.")
 
     net.eval()

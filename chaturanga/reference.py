@@ -1,219 +1,185 @@
 """
 Deliberately slow, obviously-correct reference engine for differential testing.
 
-Written independently from the production engine (moves.py, terminal.py).
-Uses naive 8x8 iteration, one function per piece, no optimization.
-Written directly from RULES.md.
+Written independently from the production engine (board.py, moves.py,
+terminal.py) and directly from RULES.md. Naive code, one function per piece,
+no optimisation, no precomputed tables, no caching.
 
-Only the State container (board array, side to move, ply count) and the
-square/piece constants are shared with production. Move generation, move
-application (including promotion), the terminal ladder and material
-adjudication are all re-implemented here, so differential perft exercises
-every rule rather than only piece movement.
+It has its own representation: an 8x8 grid indexed grid[rank][file] (rank 0 =
+rank 1, file 0 = file a), positive pieces White, negative Black, using the
+RULES.md piece codes restated below. Production code is touched only at the
+boundary — a production State is read (board / side_to_move / ply_count) on the
+way in, and ref_apply_move() builds one on the way out so results can be
+compared. Move generation, move application (including promotion), the
+terminal ladder and material adjudication are all re-implemented here, so
+differential perft exercises every rule (needtofix C6, L7).
 """
 
-import numpy as np
-from .board import (
-    State, WHITE, BLACK, EMPTY,
-    PADATI, ASHVA, GAJA, RATHA, MANTRI, RAJA,
-    rank_of, file_of, sq, on_board,
-)
-
 # RULES.md values, deliberately restated rather than imported
+WHITE, BLACK = 1, -1
+EMPTY, PADATI, ASHVA, GAJA, RATHA, MANTRI, RAJA = 0, 1, 2, 3, 4, 5, 6
 REF_MOVE_CAP = 300
 REF_ADJUDICATE_MARGIN = 4.0
 REF_PIECE_VALUES = {RATHA: 5.0, ASHVA: 3.0, GAJA: 1.5, MANTRI: 1.5, PADATI: 1.0}
 
 
+class RefPosition:
+    """The reference engine's own position: grid[rank][file], side to move, ply."""
+    __slots__ = ('grid', 'side', 'ply')
+
+    def __init__(self, grid, side: int, ply: int):
+        self.grid = grid
+        self.side = side
+        self.ply = ply
+
+
+def _to_ref(position) -> RefPosition:
+    """Accept a RefPosition, or read a production State at the boundary."""
+    if isinstance(position, RefPosition):
+        return position
+    flat = [int(x) for x in position.board]
+    grid = [flat[rank * 8:(rank + 1) * 8] for rank in range(8)]
+    return RefPosition(grid, int(position.side_to_move), int(position.ply_count))
+
+
 def encode_action(from_sq: int, to_sq: int) -> int:
-    """action = from_square * 64 + to_square (RULES §3.1)."""
+    """action = from_square * 64 + to_square (RULES §3.1), square = rank * 8 + file."""
     return from_sq * 64 + to_sq
 
 
-def ref_generate_moves(state: State) -> list[int]:
+def _square(rank: int, file: int) -> int:
+    return rank * 8 + file
+
+
+def _inside(rank: int, file: int) -> bool:
+    return 0 <= rank < 8 and 0 <= file < 8
+
+
+def _is_enemy(grid, rank, file, side) -> bool:
+    piece = grid[rank][file]
+    return piece != EMPTY and (piece > 0) != (side == WHITE)
+
+
+def _is_friendly(grid, rank, file, side) -> bool:
+    piece = grid[rank][file]
+    return piece != EMPTY and (piece > 0) == (side == WHITE)
+
+
+def _step_targets(grid, rank, file, side, deltas, moves):
+    """One-shot targets (leapers and one-step pieces): empty or enemy squares."""
+    for dr, df in deltas:
+        r, f = rank + dr, file + df
+        if _inside(r, f) and not _is_friendly(grid, r, f, side):
+            moves.append(encode_action(_square(rank, file), _square(r, f)))
+
+
+def _ref_padati(grid, rank, file, side, moves):
+    """Padati: one step forward onto an empty square; captures one step diagonally forward."""
+    forward = 1 if side == WHITE else -1
+    r = rank + forward
+    if not (0 <= r < 8):
+        return
+    if grid[r][file] == EMPTY:
+        moves.append(encode_action(_square(rank, file), _square(r, file)))
+    for df in (-1, 1):
+        f = file + df
+        if 0 <= f < 8 and _is_enemy(grid, r, f, side):
+            moves.append(encode_action(_square(rank, file), _square(r, f)))
+
+
+def _ref_ashva(grid, rank, file, side, moves):
+    """Ashva: standard knight leap."""
+    _step_targets(grid, rank, file, side,
+                  [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)], moves)
+
+
+def _ref_gaja(grid, rank, file, side, moves):
+    """Gaja: exactly two squares diagonally, jumping. The middle square does not matter."""
+    _step_targets(grid, rank, file, side, [(-2, -2), (-2, 2), (2, -2), (2, 2)], moves)
+
+
+def _ref_mantri(grid, rank, file, side, moves):
+    """Mantri: exactly one square diagonally."""
+    _step_targets(grid, rank, file, side, [(-1, -1), (-1, 1), (1, -1), (1, 1)], moves)
+
+
+def _ref_raja(grid, rank, file, side, moves):
+    """Raja: one square in any direction. NO CHECK FILTERING."""
+    _step_targets(grid, rank, file, side,
+                  [(dr, df) for dr in (-1, 0, 1) for df in (-1, 0, 1) if (dr, df) != (0, 0)], moves)
+
+
+def _ref_ratha(grid, rank, file, side, moves):
+    """Ratha: any distance orthogonally, stopped by the first occupied square (captured if enemy)."""
+    for dr, df in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+        r, f = rank + dr, file + df
+        while _inside(r, f):
+            if grid[r][f] == EMPTY:
+                moves.append(encode_action(_square(rank, file), _square(r, f)))
+            else:
+                if _is_enemy(grid, r, f, side):
+                    moves.append(encode_action(_square(rank, file), _square(r, f)))
+                break
+            r, f = r + dr, f + df
+
+
+_PIECE_GENERATORS = {
+    PADATI: _ref_padati, ASHVA: _ref_ashva, GAJA: _ref_gaja,
+    RATHA: _ref_ratha, MANTRI: _ref_mantri, RAJA: _ref_raja,
+}
+
+
+def ref_generate_moves(position) -> list[int]:
     """
     Reference move generation — deliberately simple and obviously correct.
-    One function per piece type, no optimization.
+    Accepts a RefPosition or a production State. Returns sorted action ids.
     """
-    board = state.board
-    side = state.side_to_move
+    pos = _to_ref(position)
     moves = []
-    
-    for square in range(64):
-        piece = board[square]
-        if piece == EMPTY:
-            continue
-        
-        # Check ownership
-        if side == WHITE and piece <= 0:
-            continue
-        if side == BLACK and piece >= 0:
-            continue
-        
-        piece_type = abs(int(piece))
-        
-        if piece_type == PADATI:
-            _ref_padati(board, square, side, moves)
-        elif piece_type == ASHVA:
-            _ref_ashva(board, square, side, moves)
-        elif piece_type == GAJA:
-            _ref_gaja(board, square, side, moves)
-        elif piece_type == RATHA:
-            _ref_ratha(board, square, side, moves)
-        elif piece_type == MANTRI:
-            _ref_mantri(board, square, side, moves)
-        elif piece_type == RAJA:
-            _ref_raja(board, square, side, moves)
-    
+    for rank in range(8):
+        for file in range(8):
+            piece = pos.grid[rank][file]
+            if piece == EMPTY or (piece > 0) != (pos.side == WHITE):
+                continue
+            _PIECE_GENERATORS[abs(piece)](pos.grid, rank, file, pos.side, moves)
     return sorted(moves)
 
 
-def _is_enemy(board, sq_idx, side):
-    """Check if the piece at sq_idx is an enemy piece."""
-    p = board[sq_idx]
-    if p == EMPTY:
-        return False
-    if side == WHITE:
-        return p < 0
-    else:
-        return p > 0
-
-
-def _is_friendly(board, sq_idx, side):
-    """Check if the piece at sq_idx is a friendly piece."""
-    p = board[sq_idx]
-    if p == EMPTY:
-        return False
-    if side == WHITE:
-        return p > 0
-    else:
-        return p < 0
-
-
-def _ref_padati(board, s, side, moves):
-    """Padati: one step forward, diagonal capture. No double step. No en passant."""
-    r, f = rank_of(s), file_of(s)
-    direction = 1 if side == WHITE else -1
-    
-    # Forward (non-capture)
-    nr = r + direction
-    if 0 <= nr < 8:
-        target = sq(nr, f)
-        if board[target] == EMPTY:
-            moves.append(encode_action(s, target))
-    
-    # Diagonal captures
-    for df in [-1, 1]:
-        nf = f + df
-        nr = r + direction
-        if 0 <= nr < 8 and 0 <= nf < 8:
-            target = sq(nr, nf)
-            if _is_enemy(board, target, side):
-                moves.append(encode_action(s, target))
-
-
-def _ref_ashva(board, s, side, moves):
-    """Ashva: standard knight leap."""
-    r, f = rank_of(s), file_of(s)
-    knight_offsets = [
-        (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-        (1, -2), (1, 2), (2, -1), (2, 1),
-    ]
-    for dr, df in knight_offsets:
-        nr, nf = r + dr, f + df
-        if 0 <= nr < 8 and 0 <= nf < 8:
-            target = sq(nr, nf)
-            if not _is_friendly(board, target, side):
-                moves.append(encode_action(s, target))
-
-
-def _ref_gaja(board, s, side, moves):
-    """Gaja: exactly two squares diagonally, jumping. Cannot move one square."""
-    r, f = rank_of(s), file_of(s)
-    for dr, df in [(-2, -2), (-2, 2), (2, -2), (2, 2)]:
-        nr, nf = r + dr, f + df
-        if 0 <= nr < 8 and 0 <= nf < 8:
-            target = sq(nr, nf)
-            if not _is_friendly(board, target, side):
-                moves.append(encode_action(s, target))
-
-
-def _ref_ratha(board, s, side, moves):
-    """Ratha: any distance orthogonally, blocked by first occupied square."""
-    r, f = rank_of(s), file_of(s)
-    for dr, df in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-        cr, cf = r + dr, f + df
-        while 0 <= cr < 8 and 0 <= cf < 8:
-            target = sq(cr, cf)
-            p = board[target]
-            if p == EMPTY:
-                moves.append(encode_action(s, target))
-            elif _is_enemy(board, target, side):
-                moves.append(encode_action(s, target))
-                break
-            else:
-                # Friendly piece, blocked
-                break
-            cr += dr
-            cf += df
-
-
-def _ref_mantri(board, s, side, moves):
-    """Mantri: exactly one square diagonally."""
-    r, f = rank_of(s), file_of(s)
-    for dr, df in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
-        nr, nf = r + dr, f + df
-        if 0 <= nr < 8 and 0 <= nf < 8:
-            target = sq(nr, nf)
-            if not _is_friendly(board, target, side):
-                moves.append(encode_action(s, target))
-
-
-def _ref_raja(board, s, side, moves):
-    """Raja: one square in any direction. NO CHECK FILTERING."""
-    r, f = rank_of(s), file_of(s)
-    for dr in [-1, 0, 1]:
-        for df in [-1, 0, 1]:
-            if dr == 0 and df == 0:
-                continue
-            nr, nf = r + dr, f + df
-            if 0 <= nr < 8 and 0 <= nf < 8:
-                target = sq(nr, nf)
-                if not _is_friendly(board, target, side):
-                    moves.append(encode_action(s, target))
-
-
-def ref_apply_move(state: State, action: int) -> State:
+def ref_apply_position(position, action: int) -> RefPosition:
     """Apply a move: displace any piece on the target, promote a Padati on the last rank."""
-    from_square = action // 64
-    to_square = action % 64
-    board = [int(x) for x in state.board]
-    piece = board[from_square]
-    board[from_square] = EMPTY
-    board[to_square] = piece
-    
-    last_rank = 7 if state.side_to_move == WHITE else 0
-    if abs(piece) == PADATI and to_square // 8 == last_rank:
-        board[to_square] = MANTRI if piece > 0 else -MANTRI
-    
-    return State(board=np.array(board, dtype=np.int8),
-                 side_to_move=-state.side_to_move,
-                 ply_count=state.ply_count + 1)
+    pos = _to_ref(position)
+    from_sq, to_sq = action // 64, action % 64
+    fr, ff, tr, tf = from_sq // 8, from_sq % 8, to_sq // 8, to_sq % 8
+    grid = [row[:] for row in pos.grid]
+    piece = grid[fr][ff]
+    grid[fr][ff] = EMPTY
+    grid[tr][tf] = piece
+    last_rank = 7 if pos.side == WHITE else 0
+    if abs(piece) == PADATI and tr == last_rank:
+        grid[tr][tf] = MANTRI if piece > 0 else -MANTRI
+    return RefPosition(grid, -pos.side, pos.ply + 1)
 
 
-def _ref_pieces(board, side) -> list[int]:
+def ref_apply_move(position, action: int):
+    """ref_apply_position(), returned as a production State so results can be compared."""
+    import numpy as np
+    from .board import State
+    pos = ref_apply_position(position, action)
+    board = np.array([pos.grid[r][f] for r in range(8) for f in range(8)], dtype=np.int8)
+    return State(board=board, side_to_move=pos.side, ply_count=pos.ply)
+
+
+def _ref_pieces(grid, side) -> list[int]:
     """Piece types (absolute values) belonging to `side`."""
-    if side == WHITE:
-        return [int(p) for p in board if p > 0]
-    return [int(-p) for p in board if p < 0]
+    return [abs(p) for row in grid for p in row if p != EMPTY and (p > 0) == (side == WHITE)]
 
 
-def ref_is_terminal(state: State) -> tuple[bool, float]:
+def ref_is_terminal(position) -> tuple[bool, float]:
     """Terminal ladder from RULES.md, in order, from the side to move's view."""
-    me = state.side_to_move
-    mine = _ref_pieces(state.board, me)
-    theirs = _ref_pieces(state.board, -me)
-    
+    pos = _to_ref(position)
+    mine = _ref_pieces(pos.grid, pos.side)
+    theirs = _ref_pieces(pos.grid, -pos.side)
+
     # 1. Raja captured
     if RAJA not in mine:
         return True, -1.0
@@ -224,10 +190,10 @@ def ref_is_terminal(state: State) -> tuple[bool, float]:
     if mine == [RAJA]:
         return True, -1.0
     # 4. Stalemate: the player with no legal move WINS
-    if len(ref_generate_moves(state)) == 0:
+    if len(ref_generate_moves(pos)) == 0:
         return True, 1.0
     # 5. Move cap: adjudicate on material
-    if state.ply_count >= REF_MOVE_CAP:
+    if pos.ply >= REF_MOVE_CAP:
         diff = (sum(REF_PIECE_VALUES.get(p, 0.0) for p in mine)
                 - sum(REF_PIECE_VALUES.get(p, 0.0) for p in theirs))
         if diff >= REF_ADJUDICATE_MARGIN:
@@ -238,16 +204,17 @@ def ref_is_terminal(state: State) -> tuple[bool, float]:
     return False, 0.0
 
 
-def ref_perft(state: State, depth: int) -> int:
-    """Reference perft — no production code on the path except the State container."""
+def ref_perft(position, depth: int) -> int:
+    """Reference perft on the reference engine's own representation."""
+    return _ref_perft(_to_ref(position), depth)
+
+
+def _ref_perft(pos: RefPosition, depth: int) -> int:
     if depth == 0:
         return 1
-    
-    done, _ = ref_is_terminal(state)
-    if done:
+    if ref_is_terminal(pos)[0]:
         return 0
-    
-    count = 0
-    for action in ref_generate_moves(state):
-        count += ref_perft(ref_apply_move(state, action), depth - 1)
-    return count
+    moves = ref_generate_moves(pos)
+    if depth == 1:
+        return len(moves)   # every child is a depth-0 leaf
+    return sum(_ref_perft(ref_apply_position(pos, a), depth - 1) for a in moves)

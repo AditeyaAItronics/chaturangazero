@@ -14,20 +14,23 @@ mcts:
   c_puct: 1.5
   dirichlet_alpha: 1.0
   dirichlet_eps: 0.25
-  virtual_loss: 3
+  virtual_loss: 3         # used when leaves_per_step > 1
   reuse_subtree: true
+  leaves_per_step: 1      # leaves per game per network batch; raise (2-8) after benchmarking
+  eval_cache_size: 50000  # transposition/evaluation cache entries per worker; 0 = off
 
 play:
   temp_moves: 10
   move_cap: 42        # 6*7 = 42 max moves
 
 train:
-  optimizer: adam
+  optimizer: adamw              # decoupled weight decay (needtofix L3); "adam" = plan's explicit L2 loss
   lr: 2.0e-3
   lr_milestones: [30, 60]
   lr_gamma: 0.1
   batch_size: 256
-  l2: 1.0e-4
+  l2: 1.0e-4                # c in the explicit L2 term, used only with optimizer: adam
+  weight_decay: 1.0e-2     # AdamW decay; tune (typical 1e-2 to 1e-1)
   buffer_size: 100000
   steps_per_iter: 500
   grad_clip: 1.0
@@ -44,7 +47,7 @@ loop:
   games_per_iter: 100
   iterations: 50
   parallel_games: 16
-  workers: 4
+  workers: 4               # self-play processes (1 = in-process)
 
 device: auto        # auto | cpu | cuda | cuda:N  (CLI --device or CHATURANGA_DEVICE override)
 seed: 20260829

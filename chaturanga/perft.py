@@ -27,12 +27,15 @@ def perft(state: State, depth: int) -> int:
     moves = generate_moves(state)
     if not moves:
         return 0
-    
+    if depth == 1:
+        # Bulk count: every child is a depth-0 leaf (counted 1 even if terminal)
+        return len(moves)
+
     count = 0
     for action in moves:
         child = apply_move(state, action)
         count += perft(child, depth - 1)
-    
+
     return count
 
 
@@ -47,6 +50,8 @@ def perft_divide(state: State, depth: int) -> dict[int, int]:
         return {}
     
     results = {}
+    if is_terminal(state)[0]:
+        return results
     moves = generate_moves(state)
     for action in moves:
         child = apply_move(state, action)

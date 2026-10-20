@@ -12,6 +12,8 @@ import os
 import sys
 import glob
 import time
+import threading
+from functools import wraps
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -30,7 +32,7 @@ from chaturanga.board import (
 from chaturanga.moves import generate_moves, apply_move, decode_action, encode_action
 from chaturanga.terminal import is_terminal as chaturanga_is_terminal
 from connect4.game import Connect4State, ROWS as C4_ROWS, COLS as C4_COLS
-from net.model import create_chaturanga_net, create_connect4_net
+from net.model import create_chaturanga_net, create_connect4_net, load_net_from_checkpoint
 from search.mcts import search
 from search.baselines import random_player, greedy_material_player, alpha_beta_player
 from utils.device import get_device, describe_device, add_device_argument
@@ -65,11 +67,8 @@ def get_model(game: str, model_id: str):
             return _MODEL_CACHE[cache_key]
 
         try:
-            # 5 blocks, 64 channels per local.yaml
-            net = create_chaturanga_net(n_blocks=5, channels=64).to(device)
-            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-            net.load_state_dict(ckpt['model_state_dict'])
-            net.eval()
+            # Architecture comes from the checkpoint (local 5x64 or cloud 8x128)
+            net, _ = load_net_from_checkpoint(checkpoint_path, device=device)
 
             def evaluate(state):
                 enc = state.encode()
@@ -105,11 +104,7 @@ def get_model(game: str, model_id: str):
             return _MODEL_CACHE[cache_key]
 
         try:
-            # 3 blocks, 64 channels for Connect-4
-            net = create_connect4_net(n_blocks=3, channels=64).to(device)
-            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-            net.load_state_dict(ckpt['model_state_dict'])
-            net.eval()
+            net, _ = load_net_from_checkpoint(checkpoint_path, device=device)
 
             def evaluate(state):
                 enc = state.encode()
@@ -153,6 +148,19 @@ class GameSession:
 
 
 current_session = GameSession('chaturanga', 'human', 'az_latest')
+
+# Flask serves requests on several threads; every route that reads or changes
+# the shared game session holds this lock, so e.g. a double-clicked "AI move"
+# cannot apply two moves to the same position (needtofix L4).
+_SESSION_LOCK = threading.Lock()
+
+
+def _with_session_lock(route):
+    @wraps(route)
+    def locked(*args, **kwargs):
+        with _SESSION_LOCK:
+            return route(*args, **kwargs)
+    return locked
 
 
 def serialize_state(session: GameSession) -> dict:
@@ -300,11 +308,13 @@ def list_models():
 
 
 @app.route('/api/state', methods=['GET'])
+@_with_session_lock
 def get_state():
     return jsonify(serialize_state(current_session))
 
 
 @app.route('/api/new_game', methods=['POST'])
+@_with_session_lock
 def new_game():
     data = request.json or {}
     game = data.get('game', 'chaturanga')
@@ -320,6 +330,7 @@ def new_game():
 
 
 @app.route('/api/make_move', methods=['POST'])
+@_with_session_lock
 def make_move():
     data = request.json or {}
     action = data.get('action')
@@ -356,6 +367,7 @@ def make_move():
 
 
 @app.route('/api/ai_move', methods=['POST'])
+@_with_session_lock
 def ai_move():
     state = current_session.state
     done, _ = state.is_terminal()
@@ -452,6 +464,7 @@ def ai_move():
 
 
 @app.route('/api/undo', methods=['POST'])
+@_with_session_lock
 def undo_move():
     if not current_session.history:
         return jsonify({'error': 'no moves to undo'}), 400

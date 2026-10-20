@@ -13,10 +13,12 @@ import numpy as np
 from .board import (
     State, WHITE, BLACK,
     PADATI, ASHVA, GAJA, RATHA, MANTRI, RAJA,
-    rank_of, file_of, sq, MOVE_CAP,
+    rank_of, file_of, sq, get_move_cap,
 )
 
 NUM_PLANES = 14
+# Piece codes in plane order, shaped for broadcasting against an (8, 8) grid
+_PIECE_CODES = np.array([PADATI, ASHVA, GAJA, RATHA, MANTRI, RAJA], dtype=np.int8)[:, None, None]
 
 # Piece type to plane index offset (0-indexed)
 _PIECE_PLANE = {
@@ -37,33 +39,22 @@ def encode_state(state: State) -> np.ndarray:
     is always "us," moving up the board. The network learns one player's
     game rather than two.
     """
-    planes = np.zeros((NUM_PLANES, 8, 8), dtype=np.float32)
-    
+    planes = np.empty((NUM_PLANES, 8, 8), dtype=np.float32)
+
     side = state.side_to_move
-    board = state.board
-    
-    for s in range(64):
-        piece = board[s]
-        if piece == EMPTY:
-            continue
+    grid = state.board.reshape(8, 8)
+
+    # Canonical orientation: flip ranks if Black to move
+    if side == BLACK:
+        grid = grid[::-1]
+
+    # Planes 0-5 ours, 6-11 theirs, in _PIECE_PLANE order (Padati..Raja = 1..6)
+    signed = grid * np.int8(side)
+    planes[0:6] = signed[None] == _PIECE_CODES
+    planes[6:12] = signed[None] == -_PIECE_CODES
         
-        r, f = rank_of(s), file_of(s)
-        
-        # Canonical orientation: flip board if Black to move
-        if side == BLACK:
-            r = 7 - r
-        
-        piece_type = abs(int(piece))
-        is_ours = (piece > 0 and side == WHITE) or (piece < 0 and side == BLACK)
-        
-        plane_offset = _PIECE_PLANE[piece_type]
-        if is_ours:
-            planes[plane_offset, r, f] = 1.0
-        else:
-            planes[6 + plane_offset, r, f] = 1.0
-    
     # Plane 12: ply_count / move_cap
-    planes[12, :, :] = state.ply_count / MOVE_CAP
+    planes[12, :, :] = state.ply_count / get_move_cap()
     
     # Plane 13: all ones (board-edge reference)
     planes[13, :, :] = 1.0
@@ -144,11 +135,7 @@ def mirror_state(state: State) -> 'State':
     Files are flipped: a<->h, b<->g, c<->f, d<->e.
     Ranks and piece types remain the same.
     """
-    new_board = np.zeros(64, dtype=np.int8)
-    for s in range(64):
-        r, f = rank_of(s), file_of(s)
-        mirror_sq = sq(r, 7 - f)
-        new_board[mirror_sq] = state.board[s]
-    
+    new_board = state.board.reshape(8, 8)[:, ::-1].ravel()
+        
     return State(board=new_board, side_to_move=state.side_to_move,
                  ply_count=state.ply_count)

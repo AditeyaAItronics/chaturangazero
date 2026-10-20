@@ -71,7 +71,7 @@ class Connect4State:
             last_action=action,
         )
     
-    def is_terminal(self) -> tuple[bool, float]:
+    def is_terminal(self, adjudicate: bool = True) -> tuple[bool, float]:
         """
         Check terminal conditions.
         Returns (done, z) where z is from side-to-move's perspective.

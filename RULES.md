@@ -83,3 +83,36 @@ Order matters. Rule 2 must precede rule 3, or King-vs-King resolves as a loss fo
 | Repetition | **No rule** |
 | 50-move | **No rule** |
 | Bare king | **Loss**, except K-v-K → draw |
+
+## Move Cap and Adjudication (§2.2)
+
+There is **no rule that guarantees a game ends**: no repetition draw and no 50-move rule. The move cap is therefore the sole termination guarantee and is enforced as a hard invariant: applying a move from a position at the cap raises an error.
+
+- **Cap:** `move_cap = 300` plies by default (`play.move_cap` in the config).
+- **Training games** that reach the cap are adjudicated on material, from the perspective of the side to move:
+
+  ```
+  material = 5·Ratha + 3·Ashva + 1.5·Gaja + 1.5·Mantri + 1·Padati   (Raja not counted)
+  diff     = our material − their material
+  |diff| >= 4   →  z = sign(diff)     (decisive)
+  otherwise     →  z = 0              (draw)
+  ```
+
+  The margin is `play.adjudicate_margin` (default 4.0).
+- **Adjudication is a training-only device.** Arena, baseline and evaluation games never adjudicate: a game that reaches the cap is scored as a **draw**.
+- **Monitoring:** log the fraction of self-play games ending at the cap every iteration. Under 15% is healthy. Above 25% means the agent has found the shuffling attractor. Respond in this order:
+  1. tighten the cap to 200;
+  2. lower the margin to 2.0;
+  3. raise the root Dirichlet ε.
+
+## Note: King-vs-King cannot arise in play
+
+A player never loses a piece on their own move, and a side reduced to a bare Raja loses at the start of its turn (rule 3). So rule 2 (King-vs-King draw) can only fire in a position that was set up that way. It never fires during a game that starts from the opening position. This is tested in `tests/test_low_and_speed.py`.
+
+## Sign-off
+
+Any change to this file requires all four students to sign off (initials and date) below.
+
+| Version | Change | Aditeya | Ansh | Adit | Sarthak |
+| --- | --- | --- | --- | --- | --- |
+| v2.1 | Initial frozen ruleset (§2.1), terminal ladder in order, §2.2 move cap and adjudication | | | | |

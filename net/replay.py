@@ -12,6 +12,8 @@ Replay buffer and mirror augmentation.
 - Mirror augmentation (§3.5) is applied at SAMPLE time with probability 0.5,
   so every slot holds a unique position instead of half the buffer being
   mirrored copies.
+- Each position's legal moves are stored too (same frame as π), so training
+  can mask illegal logits to -inf before the softmax (§3.1).
 """
 
 import numpy as np
@@ -52,6 +54,7 @@ class ReplayBuffer:
         self._added_at = None    # (N,) int64
         self._pi_idx = None      # (N,) object — int16 arrays of action indices
         self._pi_val = None      # (N,) object — float32 arrays of probabilities
+        self._legal = None       # (N,) object — int16 arrays of legal action indices
 
     def __len__(self) -> int:
         return self._size
@@ -68,9 +71,18 @@ class ReplayBuffer:
         self._added_at = np.zeros(n, dtype=np.int64)
         self._pi_idx = np.empty(n, dtype=object)
         self._pi_val = np.empty(n, dtype=object)
+        self._legal = np.empty(n, dtype=object)
 
-    def add(self, state: np.ndarray, policy: np.ndarray, value: float):
-        """Add a single (state, policy, value) triple. π must be in the same frame as the state."""
+    def add(self, state: np.ndarray, policy: np.ndarray, value: float,
+            legal: Optional[np.ndarray] = None):
+        """
+        Add a single (state, policy, value) triple. π must be in the same frame as the state.
+
+        Args:
+            legal: legal actions in the same frame as π — either an index array
+                or a (action_size,) bool mask. If None, the non-zero entries of π
+                are used, which can miss legal moves MCTS never visited.
+        """
         state = np.asarray(state, dtype=np.float32)
         policy = np.asarray(policy, dtype=np.float32)
         if self._shape is None:
@@ -94,16 +106,56 @@ class ReplayBuffer:
         nz = np.flatnonzero(policy)
         self._pi_idx[i] = nz.astype(np.int16)
         self._pi_val[i] = policy[nz]
+        if legal is None:
+            self._legal[i] = self._pi_idx[i]
+        else:
+            legal = np.asarray(legal)
+            if legal.dtype == bool:
+                legal = np.flatnonzero(legal)
+            self._legal[i] = legal.astype(np.int16)
 
-        self._next = (i + 1) % self.max_size
+        self._advance()
+
+    def _advance(self):
+        self._next = (self._next + 1) % self.max_size
         self._size = min(self._size + 1, self.max_size)
         self._total_added += 1
+
+    def _ordered_slots(self) -> np.ndarray:
+        """Slot indices from oldest to newest."""
+        n = len(self)
+        return (np.arange(n) + (self._next if n == self.max_size else 0)) % self.max_size
+
+    def merge(self, other: 'ReplayBuffer'):
+        """
+        Append every position of `other` (oldest first) without decoding it.
+        Used to collect the buffers that self-play worker processes send back.
+        """
+        if len(other) == 0:
+            return
+        if self._shape is None:
+            self._allocate(np.zeros(other._shape, np.float32),
+                           np.zeros(other._action_size, np.float32))
+        if other._shape != self._shape or other._action_size != self._action_size:
+            raise ValueError(f"cannot merge buffers with shapes {other._shape} and {self._shape}")
+        for j in other._ordered_slots():
+            i = self._next
+            self._bits[i] = other._bits[j]
+            self._consts[i] = other._consts[j]
+            self._is_const[i] = other._is_const[j]
+            self._values[i] = other._values[j]
+            self._added_at[i] = self._total_added
+            self._pi_idx[i] = other._pi_idx[j]
+            self._pi_val[i] = other._pi_val[j]
+            self._legal[i] = other._legal[j]
+            self._advance()
 
     def add_game(
         self,
         states: list[np.ndarray],
         policies: list[np.ndarray],
         result: float,
+        legal: Optional[list] = None,
     ):
         """
         Add all positions from a completed game.
@@ -112,6 +164,7 @@ class ReplayBuffer:
             states: list of encoded board states (C, H, W)
             policies: list of policy targets π (action_size,), same frame as states
             result: game outcome z (+1 win, -1 loss, 0 draw) from player 1's perspective
+            legal: optional list of legal actions per position (same frame as π)
         """
         # Assign values: z from the perspective of the side that moved at each position.
         # Positions alternate sides, so signs alternate.
@@ -120,7 +173,7 @@ class ReplayBuffer:
             # If i is even, it was player 1's move (result = z)
             # If i is odd, it was player 2's move (result = -z)
             z = result if i % 2 == 0 else -result
-            self.add(s, pi, z)
+            self.add(s, pi, z, legal=None if legal is None else legal[i])
 
     def _decode_states(self, idx: np.ndarray) -> np.ndarray:
         c = self._shape[0]
@@ -131,7 +184,7 @@ class ReplayBuffer:
                           self._consts[idx][:, :, None], states)
         return states.reshape((len(idx),) + self._shape)
 
-    def sample(self, batch_size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def sample(self, batch_size: int, return_masks: bool = False):
         """
         Sample a random batch of positions (uniform, with replacement).
 
@@ -139,6 +192,7 @@ class ReplayBuffer:
             states: (B, C, H, W) float32
             policies: (B, action_size) float32
             values: (B, 1) float32
+            legal_masks: (B, action_size) bool — only if return_masks=True
         """
         n = len(self)
         if n < batch_size:
@@ -147,6 +201,7 @@ class ReplayBuffer:
         idx = np.random.randint(0, n, size=batch_size)
         states = self._decode_states(idx)
         policies = np.zeros((batch_size, self._action_size), dtype=np.float32)
+        masks = np.zeros((batch_size, self._action_size), dtype=bool) if return_masks else None
 
         if self.mirror_perm is not None:
             flip = np.random.random(batch_size) < 0.5
@@ -159,8 +214,15 @@ class ReplayBuffer:
             if flip[b]:
                 a = self.mirror_perm[a]
             policies[b, a] = self._pi_val[j]
+            if return_masks:
+                legal = self._legal[j].astype(np.int64)
+                if flip[b]:
+                    legal = self.mirror_perm[legal]
+                masks[b, legal] = True
 
         values = self._values[idx][:, None].copy()
+        if return_masks:
+            return states, policies, values, masks
         return states, policies, values
 
     def age_histogram(self, n_bins: int = 10) -> list[int]:
@@ -196,6 +258,8 @@ class ReplayBuffer:
             pi_len=lengths,
             pi_idx=np.concatenate([self._pi_idx[i] for i in order]),
             pi_val=np.concatenate([self._pi_val[i] for i in order]),
+            legal_len=np.array([len(self._legal[i]) for i in order], dtype=np.int32),
+            legal_idx=np.concatenate([self._legal[i] for i in order]),
         )
 
     def load(self, path: str):
@@ -221,6 +285,10 @@ class ReplayBuffer:
         values = data['values'][keep]
         offsets = np.concatenate([[0], np.cumsum(data['pi_len'])])
         pi_idx, pi_val = data['pi_idx'], data['pi_val']
+        has_legal = 'legal_idx' in data
+        if has_legal:
+            legal_offsets = np.concatenate([[0], np.cumsum(data['legal_len'])])
+            legal_idx = data['legal_idx']
 
         m = len(values)
         self._bits[:m], self._consts[:m], self._is_const[:m] = bits, consts, is_const
@@ -230,6 +298,10 @@ class ReplayBuffer:
             lo, hi = offsets[start + k], offsets[start + k + 1]
             self._pi_idx[k] = pi_idx[lo:hi]
             self._pi_val[k] = pi_val[lo:hi]
+            if has_legal:
+                self._legal[k] = legal_idx[legal_offsets[start + k]:legal_offsets[start + k + 1]]
+            else:   # saved before legal moves were stored
+                self._legal[k] = self._pi_idx[k]
         self._added_at[:m] = np.arange(m)
         self._size = m
         self._total_added = m

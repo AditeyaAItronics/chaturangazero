@@ -22,6 +22,7 @@ def self_play_game(
     dirichlet_eps: float = 0.25,
     reuse_subtree: bool = True,
     mirror_perm: Optional[np.ndarray] = None,
+    cache=None,
 ) -> dict:
     """
     Play one complete game of self-play, collecting training data.
@@ -41,6 +42,9 @@ def self_play_game(
     
     states_encoded = []
     policies = []
+    legal_canonical = []
+    raja_capture_chances = 0
+    raja_captures_missed = 0
     root_node = None
     
     while True:
@@ -60,8 +64,8 @@ def self_play_game(
         # Get encoded state for training data
         encoded = state.encode()
         
-        # Run MCTS
-        visit_counts = search(
+        # Run MCTS (keeping the root so the chosen subtree can be reused)
+        visit_counts, root = search(
             state=state,
             evaluate=evaluate,
             n_sims=n_sims,
@@ -71,6 +75,8 @@ def self_play_game(
             dirichlet_eps=dirichlet_eps,
             add_noise=True,
             root_node=root_node,
+            cache=cache,
+            return_root=True,
         )
         
         # Select action with temperature
@@ -86,19 +92,21 @@ def self_play_game(
         action, pi = select_action_with_temperature(
             visit_counts, temperature, legal_actions
         )
+
+        # Diagnostic (§2.1): a free Raja capture was available but not played
+        from pipeline.inference_server import _raja_capture_actions
+        raja_captures = _raja_capture_actions(state, legal_actions)
+        if raja_captures:
+            raja_capture_chances += 1
+            raja_captures_missed += action not in raja_captures
         
         # Store training data — π in the same canonical frame as the encoding
         states_encoded.append(encoded)
         policies.append(state.orient_policy(pi))
+        legal_canonical.append(np.flatnonzero(state.orient_policy(state.legal_mask())))
         
-        # Subtree reuse
-        if reuse_subtree:
-            root_node = get_subtree(
-                _get_root_from_search(visit_counts, state, action_size),
-                action,
-            )
-        else:
-            root_node = None
+        # Subtree reuse: the chosen child's tree becomes the next root
+        root_node = get_subtree(root, action) if reuse_subtree else None
         
         # Apply action
         if hasattr(state, 'apply'):
@@ -110,40 +118,26 @@ def self_play_game(
     return {
         'states': states_encoded,
         'policies': policies,
+        'legal': legal_canonical,
+        'raja_capture_chances': raja_capture_chances,
+        'raja_captures_missed': int(raja_captures_missed),
         'result': result,
         'ply_count': state.ply_count,
         'terminal_reason': terminal_reason,
     }
 
 
-def _get_root_from_search(visit_counts, state, action_size):
-    """Helper to reconstruct root node for subtree reuse."""
-    # For now, we skip subtree reuse in naive mode
-    # The parallel-games server in Phase 4 will handle this properly
-    return None
-
-
-def _classify_terminal(state, z) -> str:
-    """Classify how the game ended."""
-    from chaturanga.board import MOVE_CAP
-    
-    if not state.has_raja(state.side_to_move):
-        return 'raja_captured'
-    
-    side_count = state.piece_count(state.side_to_move)
-    opp_count = state.piece_count(-state.side_to_move)
-    
-    if side_count == 1 and opp_count == 1:
-        return 'king_vs_king'
-    
-    if side_count == 1 and opp_count > 1:
-        return 'bare_king'
-    
-    if state.ply_count >= MOVE_CAP:
-        return 'move_cap'
-    
-    # Must be stalemate
-    return 'stalemate'
+def _classify_terminal(state, z=None) -> str:
+    """
+    Classify how the game ended. Delegates to the terminal ladder itself, so
+    the reason can never disagree with is_terminal() (it used to check the
+    move cap before stalemate — the reverse of §2.1).
+    """
+    if hasattr(state, 'board') and getattr(state.board, 'ndim', 0) == 1:
+        from chaturanga.terminal import terminal_reason
+        return terminal_reason(state)
+    # Connect-4
+    return 'board_full' if z == 0 else 'four_in_a_row'
 
 
 def run_self_play_batch(
@@ -158,12 +152,18 @@ def run_self_play_batch(
     dirichlet_alpha: float = 0.3,
     dirichlet_eps: float = 0.25,
     verbose: bool = True,
+    reuse_subtree: bool = True,
+    eval_cache_size: int = 50_000,
 ) -> list[dict]:
     """
     Run a batch of self-play games sequentially (naive mode).
-    
+
     Phase 4 replaces this with parallel-games batched mode.
+    One evaluation cache (transposition table) is shared by all games in the
+    batch — valid because the network is fixed for the whole batch.
     """
+    from search.cache import EvalCache
+    cache = EvalCache(eval_cache_size) if eval_cache_size > 0 else None
     games = []
     stats = {
         'raja_captured': 0,
@@ -187,7 +187,11 @@ def run_self_play_batch(
             move_cap=move_cap,
             dirichlet_alpha=dirichlet_alpha,
             dirichlet_eps=dirichlet_eps,
+            reuse_subtree=reuse_subtree,
+            cache=cache,
         )
+        if cache is not None:
+            game.update(cache.stats())   # cumulative for the batch so far
         games.append(game)
         
         reason = game['terminal_reason']

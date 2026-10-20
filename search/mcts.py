@@ -14,6 +14,7 @@ import numpy as np
 import math
 from typing import Callable, Optional
 from .node import Node
+from .cache import EvalCache, apply_entry
 
 
 def search(
@@ -26,7 +27,9 @@ def search(
     dirichlet_eps: float = 0.25,
     add_noise: bool = True,
     root_node: Optional[Node] = None,
-) -> np.ndarray:
+    cache: Optional[EvalCache] = None,
+    return_root: bool = False,
+):
     """
     Run MCTS from the given state.
     
@@ -42,144 +45,143 @@ def search(
         dirichlet_eps: Weight of Dirichlet noise at root.
         add_noise: Whether to add Dirichlet noise at root.
         root_node: Optional existing node for subtree reuse.
-    
+        cache: Optional EvalCache shared across searches (transposition table).
+        return_root: also return the root node, so the caller can reuse the
+            chosen child's subtree on the next move.
+
     Returns:
-        visit_counts: np.ndarray of shape (action_size,) — raw visit counts.
+        visit_counts: np.ndarray of shape (action_size,) — raw visit counts,
+        or (visit_counts, root) if return_root.
     """
     # Create or reuse root
     if root_node is not None and root_node.is_expanded:
         root = root_node
         root.parent = None
         root.parent_action = -1
+        root.parent_edge = -1
     else:
         root = Node(state, action_size=action_size)
-        _expand(root, evaluate, action_size)
-    
+        _expand(root, evaluate, action_size, cache)
+
     # Add Dirichlet noise at the root
-    if add_noise and root.legal_actions:
-        noise = np.random.dirichlet(
-            [dirichlet_alpha] * len(root.legal_actions)
-        )
-        for i, action in enumerate(root.legal_actions):
-            root.P[action] = (1 - dirichlet_eps) * root.P[action] + dirichlet_eps * noise[i]
-    
+    if add_noise:
+        root.add_root_noise(dirichlet_alpha, dirichlet_eps)
+
     # Run simulations
     for _ in range(n_sims):
         node = root
-        
+
         # 1. SELECT — traverse tree using PUCT until we reach an unexpanded node
         while node.is_expanded and not node.is_terminal:
-            action = _select_action(node, c_puct)
-            if action in node.children:
-                node = node.children[action]
+            edge = _select_edge(node, c_puct)
+            action = node.legal_actions[edge]
+            child = node.children.get(action)
+            if child is not None:
+                node = child
             else:
                 # Create child and expand
-                child_state = _apply_action(node.state, action)
-                child = Node(child_state, parent=node, parent_action=action,
-                           action_size=action_size)
+                child = Node(_apply_action(node.state, action), parent=node,
+                             parent_action=action, action_size=action_size, parent_edge=edge)
                 node.children[action] = child
                 node = child
                 break
-        
+
         # 2. EXPAND & EVALUATE
         if not node.is_expanded and not node.is_terminal:
-            value = _expand(node, evaluate, action_size)
+            value = _expand(node, evaluate, action_size, cache)
         elif node.is_terminal:
             value = node.terminal_value
         else:
             # Already expanded, evaluate leaf
             value = 0.0
-        
+
         # 3. BACKUP — propagate value up the tree with sign flipping
         _backup(node, value)
-    
+
+    if return_root:
+        return root.visit_distribution(), root
     return root.visit_distribution()
 
 
-def _expand(node: Node, evaluate: Callable, action_size: int) -> float:
+def _expand(node: Node, evaluate: Callable, action_size: int,
+            cache: Optional[EvalCache] = None) -> float:
     """
     Expand a node: check terminal, get policy/value from evaluator.
     Returns the value of this node from the side-to-move's perspective.
     """
     state = node.state
-    
+
+    if cache is not None:
+        entry = cache.get(state)
+        if entry is not None:
+            return apply_entry(node, entry)
+
     # Check terminal
     done, z = state.is_terminal()
     if done:
-        node.is_terminal = True
-        node.terminal_value = z
-        node.is_expanded = True
+        node.set_terminal(z)
+        if cache is not None:
+            cache.put_terminal(state, z)
         return z
-    
+
     # Get legal moves
     if hasattr(state, 'legal_moves'):
-        node.legal_actions = state.legal_moves()
+        legal = state.legal_moves()
     else:
         # Chaturanga uses generate_moves
         from chaturanga.moves import generate_moves
-        node.legal_actions = generate_moves(state)
-    
-    if not node.legal_actions:
+        legal = generate_moves(state)
+
+    if not legal:
         # No legal moves — this is stalemate, should be caught by is_terminal
-        node.is_terminal = True
-        node.terminal_value = 1.0  # Stalemate = win for stalemated player
-        node.is_expanded = True
+        node.set_terminal(1.0)   # Stalemate = win for stalemated player
         return 1.0
-    
+
     # Evaluate with the network
     policy, value = evaluate(state)
-    
+
     # Mask illegal actions and renormalize
-    legal_mask = np.zeros(action_size, dtype=bool)
-    for a in node.legal_actions:
-        legal_mask[a] = True
-    
-    # Apply mask
-    policy = policy * legal_mask
-    policy_sum = np.sum(policy)
-    if policy_sum > 0:
-        policy = policy / policy_sum
+    priors = np.asarray(policy, dtype=np.float64)[legal]
+    prior_sum = priors.sum()
+    if prior_sum > 0:
+        priors = priors / prior_sum
     else:
         # Uniform over legal moves if policy assigns zero to all legal
-        policy = legal_mask.astype(np.float32) / len(node.legal_actions)
-    
-    node.P[:] = policy
-    node.is_expanded = True
-    
+        priors = np.full(len(legal), 1.0 / len(legal))
+
+    node.expand(legal, priors)
+    if cache is not None:
+        cache.put_eval(state, legal, priors, value)
+
     return value
 
 
-def _select_action(node: Node, c_puct: float) -> int:
+def _select_edge(node: Node, c_puct: float) -> int:
     """
-    Select action using PUCT formula:
-    
+    Select an edge (index into node.legal_actions) using PUCT:
+
     a* = argmax_a [ Q(s,a) + c_puct * P(s,a) * sqrt(sum_N) / (1 + N(s,a)) ]
+
+    Ties go to the first legal action, as before.
     """
-    total_n = node.total_visits
+    n = node.N
     # max(.., 1): with 0 visits sqrt(0) would zero the prior term, every score
     # would tie at 0 and the first visit would always go to legal_actions[0].
-    sqrt_total = math.sqrt(max(total_n, 1.0))
-    
-    best_score = -float('inf')
-    best_action = node.legal_actions[0]
-    
-    for a in node.legal_actions:
-        q = node.Q(a)
-        prior = node.P[a]
-        exploration = c_puct * prior * sqrt_total / (1.0 + node.N[a])
-        score = q + exploration
-        
-        if score > best_score:
-            best_score = score
-            best_action = a
-    
-    return best_action
+    sqrt_total = math.sqrt(max(float(n.sum()), 1.0))
+    q = np.divide(node.W, n, out=np.zeros_like(n), where=n > 0)
+    scores = q + c_puct * node.P * sqrt_total / (1.0 + n)
+    return int(np.argmax(scores))
+
+
+def _select_action(node: Node, c_puct: float) -> int:
+    """PUCT selection returning the action id (see _select_edge)."""
+    return node.legal_actions[_select_edge(node, c_puct)]
 
 
 def _backup(node: Node, value: float):
     """
     Backup value through the tree.
-    
+
     CRITICAL: sign flips at each level.
     Parent sees -value because the child's value is from the child's
     side-to-move perspective, and the parent is the opposite side.
@@ -187,12 +189,12 @@ def _backup(node: Node, value: float):
     current = node
     v = value
     while current.parent is not None:
-        action = current.parent_action
+        edge = current.parent_edge
         parent = current.parent
         # Parent sees negated value
         v = -v
-        parent.N[action] += 1
-        parent.W[action] += v
+        parent.N[edge] += 1
+        parent.W[edge] += v
         current = parent
 
 
@@ -275,5 +277,6 @@ def get_subtree(root: Node, action: int) -> Optional[Node]:
         child = root.children[action]
         child.parent = None
         child.parent_action = -1
+        child.parent_edge = -1
         return child
     return None

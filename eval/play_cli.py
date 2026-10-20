@@ -49,36 +49,45 @@ def action_to_str(action: int) -> str:
     return f"{from_file}{from_rank}{to_file}{to_rank}"
 
 
+BASELINE_NAMES = {
+    'minimax': '3-ply Minimax/Alpha-Beta',
+    'greedy': 'Greedy Material',
+    'random': 'Random',
+}
+
+
+def make_baseline(opponent: str):
+    """Return a callable state -> action for a baseline opponent, or None for 'mcts'."""
+    from search.baselines import random_player, greedy_material_player, alpha_beta_player
+    players = {
+        'minimax': lambda state: alpha_beta_player(state, depth=3),
+        'greedy': greedy_material_player,
+        'random': random_player,
+    }
+    return players.get(opponent)
+
+
 def play_cli(checkpoint_path: str = None, human_side: int = WHITE,
              n_sims: int = 100, opponent: str = 'mcts', device=None):
     """
     Play against the agent or baseline in the terminal.
     """
     from search.mcts import search, select_action_with_temperature
-    from search.baselines import RandomPlayer, GreedyMaterialPlayer, AlphaBetaPlayer
-    from net.model import create_chaturanga_net
+    from net.model import create_chaturanga_net, load_net_from_checkpoint
     from net.train import create_evaluator
     
     device = get_device(device)
     
-    baseline_player = None
-    if opponent == 'minimax':
-        baseline_player = AlphaBetaPlayer(depth=3)
-        print("Playing against 3-ply Minimax/Alpha-Beta baseline!")
-    elif opponent == 'greedy':
-        baseline_player = GreedyMaterialPlayer()
-        print("Playing against Greedy Material baseline!")
-    elif opponent == 'random':
-        baseline_player = RandomPlayer()
-        print("Playing against Random baseline!")
+    baseline_player = make_baseline(opponent)
+    if baseline_player is not None:
+        print(f"Playing against {BASELINE_NAMES[opponent]} baseline!")
     else:
-        # Neural MCTS
+        # Neural MCTS — architecture comes from the checkpoint (local 5x64 or cloud 8x128)
         if checkpoint_path:
-            net = create_chaturanga_net(n_blocks=5, channels=64)
-            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-            net.load_state_dict(checkpoint['model_state_dict'])
-            net.to(device)
-            print(f"Loaded checkpoint: {checkpoint_path}")
+            net, _ = load_net_from_checkpoint(checkpoint_path, device=device)
+            cfg = net.config
+            print(f"Loaded checkpoint: {checkpoint_path} "
+                  f"({cfg['n_blocks']} blocks x {cfg['channels']} channels)")
         else:
             net = create_chaturanga_net(n_blocks=5, channels=64)
             net.to(device)
@@ -140,7 +149,7 @@ def play_cli(checkpoint_path: str = None, human_side: int = WHITE,
             # AI's turn
             print("\nAI is thinking...")
             if baseline_player is not None:
-                action = baseline_player.select_move(state)
+                action = baseline_player(state)
             else:
                 visit_counts = search(
                     state=state,

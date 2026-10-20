@@ -44,7 +44,35 @@ PIECE_VALUES = {
     RAJA: 0.0,  # Not counted in material for adjudication
 }
 
-MOVE_CAP = 300
+# Material value by piece type (index = abs(piece code)); Raja counts 0
+_VALUE_BY_TYPE = np.array([0.0, PIECE_VALUES[PADATI], PIECE_VALUES[ASHVA], PIECE_VALUES[GAJA],
+                           PIECE_VALUES[RATHA], PIECE_VALUES[MANTRI], PIECE_VALUES[RAJA]])
+
+MOVE_CAP = 300               # default; the live value comes from get_move_cap()
+ADJUDICATE_MARGIN = 4.0      # default; the live value comes from get_adjudicate_margin()
+
+# Runtime rule settings (§2.2). The training loop sets these from
+# config['play'] so `move_cap: 200` in the YAML actually takes effect.
+_RULES = {'move_cap': MOVE_CAP, 'adjudicate_margin': ADJUDICATE_MARGIN}
+
+
+def configure_rules(move_cap: Optional[int] = None,
+                    adjudicate_margin: Optional[float] = None) -> None:
+    """Set the move cap and material-adjudication margin; None keeps the current value."""
+    if move_cap is not None:
+        if int(move_cap) <= 0:
+            raise ValueError(f"move_cap must be positive, got {move_cap}")
+        _RULES['move_cap'] = int(move_cap)
+    if adjudicate_margin is not None:
+        _RULES['adjudicate_margin'] = float(adjudicate_margin)
+
+
+def get_move_cap() -> int:
+    return _RULES['move_cap']
+
+
+def get_adjudicate_margin() -> float:
+    return _RULES['adjudicate_margin']
 
 # --- Board Geometry ---
 def sq(rank: int, file: int) -> int:
@@ -81,14 +109,68 @@ for i, piece in enumerate(_WHITE_BACK):
     INITIAL_BOARD[sq(7, i)] = -piece
 
 
+_FEN_PIECES = {'P': PADATI, 'N': ASHVA, 'B': GAJA, 'R': RATHA, 'M': MANTRI, 'K': RAJA}
+
+
+def to_fen(state: 'State') -> str:
+    """
+    FEN-style text for a position: ranks 8 -> 1 separated by '/', letters as in
+    PIECE_NAMES (uppercase White), digits for runs of empty squares, then side
+    to move ('w'/'b') and ply count. Example start position:
+        'rnbmkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBMKBNR w 0'
+    """
+    rows = []
+    for rank in range(7, -1, -1):
+        row, empty = '', 0
+        for file in range(8):
+            p = int(state.board[sq(rank, file)])
+            if p == 0:
+                empty += 1
+                continue
+            if empty:
+                row += str(empty)
+                empty = 0
+            row += PIECE_NAMES[p]
+        rows.append(row + (str(empty) if empty else ''))
+    return f"{'/'.join(rows)} {'w' if state.side_to_move == WHITE else 'b'} {state.ply_count}"
+
+
+def from_fen(fen: str) -> 'State':
+    """Inverse of to_fen(). The ply count is optional (default 0)."""
+    fields = fen.split()
+    rows = fields[0].split('/')
+    if len(rows) != 8:
+        raise ValueError(f"expected 8 ranks in {fen!r}")
+    board = np.zeros(64, dtype=np.int8)
+    for i, row in enumerate(rows):
+        rank, file = 7 - i, 0
+        for ch in row:
+            if ch.isdigit():
+                file += int(ch)
+                continue
+            piece = _FEN_PIECES[ch.upper()]
+            board[sq(rank, file)] = piece if ch.isupper() else -piece
+            file += 1
+        if file != 8:
+            raise ValueError(f"rank {rank + 1} of {fen!r} has {file} files")
+    side = WHITE if len(fields) < 2 or fields[1] == 'w' else BLACK
+    ply = int(fields[2]) if len(fields) > 2 else 0
+    return State(board=board, side_to_move=side, ply_count=ply)
+
+
 class State:
     """
     Complete game state for Chaturanga.
     
     Conforms to the §3.4 interface contract.
+
+    A State is treated as immutable once built: legal moves and the terminal
+    result are computed at most once and cached (needtofix S3). Never modify
+    `board` in place after calling legal_moves()/is_terminal(); build a new
+    State (apply(), copy(), or State(board=...)) instead.
     """
-    __slots__ = ('board', '_side', '_ply', '_hash')
-    
+    __slots__ = ('board', '_side', '_ply', '_hash', '_moves', '_terminal')
+        
     def __init__(self, board: Optional[np.ndarray] = None,
                  side_to_move: int = WHITE, ply_count: int = 0):
         if board is None:
@@ -98,7 +180,9 @@ class State:
         self._side = side_to_move
         self._ply = ply_count
         self._hash = None
-    
+        self._moves = None       # cached generate_moves() result
+        self._terminal = None    # cached (settings, evaluate_terminal() result)
+        
     @property
     def side_to_move(self) -> int:
         return self._side
@@ -113,27 +197,14 @@ class State:
     
     def find_pieces(self, side: int) -> list[tuple[int, int]]:
         """Return list of (square, piece_type) for all pieces of the given side."""
-        pieces = []
-        if side == WHITE:
-            for s in range(64):
-                p = self.board[s]
-                if p > 0:
-                    pieces.append((s, int(p)))
-        else:
-            for s in range(64):
-                p = self.board[s]
-                if p < 0:
-                    pieces.append((s, int(-p)))
-        return pieces
-    
+        signed = self.board * side
+        squares = np.flatnonzero(signed > 0)
+        return [(int(s), int(signed[s])) for s in squares]
+
     def has_raja(self, side: int) -> bool:
         """Check if the given side has a Raja on the board."""
-        target = RAJA * side
-        for s in range(64):
-            if self.board[s] == target:
-                return True
-        return False
-    
+        return bool(np.any(self.board == RAJA * side))
+        
     def piece_count(self, side: int) -> int:
         """Count total pieces for the given side."""
         if side == WHITE:
@@ -143,18 +214,8 @@ class State:
     
     def material_score(self, side: int) -> float:
         """Compute material value for the given side (excluding Raja)."""
-        score = 0.0
-        if side == WHITE:
-            for s in range(64):
-                p = self.board[s]
-                if p > 0:
-                    score += PIECE_VALUES.get(int(p), 0.0)
-        else:
-            for s in range(64):
-                p = self.board[s]
-                if p < 0:
-                    score += PIECE_VALUES.get(int(-p), 0.0)
-        return score
+        signed = self.board * side
+        return float(_VALUE_BY_TYPE[signed[signed > 0]].sum())
     
     def display(self) -> str:
         """Return a human-readable board string."""
@@ -186,6 +247,8 @@ class State:
         s._side = self._side
         s._ply = self._ply
         s._hash = None
+        s._moves = None
+        s._terminal = None
         return s
 
     def __repr__(self) -> str:
@@ -195,10 +258,13 @@ class State:
     # These delegate to the standalone functions so that MCTS and the pipeline
     # can call state.is_terminal(), state.legal_moves(), etc. uniformly.
     
-    def is_terminal(self) -> tuple[bool, float]:
-        """Check terminal conditions. Returns (done, z) from side-to-move's view."""
+    def is_terminal(self, adjudicate: bool = True) -> tuple[bool, float]:
+        """
+        Check terminal conditions. Returns (done, z) from side-to-move's view.
+        adjudicate=False scores a move-cap ending as a draw (arena/evaluation, §2.2).
+        """
         from .terminal import is_terminal as _is_terminal
-        return _is_terminal(self)
+        return _is_terminal(self, adjudicate=adjudicate)
     
     def legal_moves(self) -> list[int]:
         """Generate all legal moves (pseudo-legal == legal in this ruleset)."""

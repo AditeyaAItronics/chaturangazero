@@ -24,10 +24,40 @@ from net.model import create_connect4_net
 from net.replay import ReplayBuffer
 from net.train import Trainer, create_evaluator
 from search.mcts import search, select_action_with_temperature
-from search.baselines import random_player
+from search.baselines import random_player, connect4_tactical_player
 from search.arena import arena
 from pipeline.inference_server import run_batched_self_play
 from utils.device import get_device, use_amp, describe_device, add_device_argument
+
+
+# Phase-0 gate (§5) and S3 exit criterion (Part 4): beat random > 95% AND greedy > 80%
+RANDOM_GATE = 0.95
+GREEDY_GATE = 0.80
+
+
+def evaluate_gates(net, device, n_sims: int, n_games: int) -> dict:
+    """Arena the current net against the random and greedy (one-ply tactics) baselines."""
+    eval_fn = create_evaluator(net, device=device, action_size=7)
+
+    def agent_player(state):
+        vc = search(state, eval_fn, n_sims=n_sims, action_size=7, c_puct=1.5, add_noise=False)
+        return int(np.argmax(vc))
+
+    vs_random = arena(agent_player, lambda s: random_player(s, action_size=7),
+                      Connect4State, n_games=n_games, action_size=7)
+    # Shared random openings: the agent is deterministic, the greedy player only partly random
+    vs_greedy = arena(agent_player, lambda s: connect4_tactical_player(s, action_size=7),
+                      Connect4State, n_games=n_games, action_size=7, opening_plies=2)
+    out = {'vs_random': vs_random, 'vs_greedy': vs_greedy,
+           'random_rate': vs_random['p1_win_rate'], 'greedy_rate': vs_greedy['p1_win_rate']}
+    out['passed'] = out['random_rate'] > RANDOM_GATE and out['greedy_rate'] > GREEDY_GATE
+    return out
+
+
+def _print_gates(g: dict, label: str):
+    r, gr = g['vs_random'], g['vs_greedy']
+    print(f"  {label} vs Random: {r['p1_wins']}-{r['draws']}-{r['p2_wins']} ({g['random_rate']:.1%}, need >{RANDOM_GATE:.0%}) | "
+          f"vs Greedy: {gr['p1_wins']}-{gr['draws']}-{gr['p2_wins']} ({g['greedy_rate']:.1%}, need >{GREEDY_GATE:.0%})")
 
 
 def run_phase0(
@@ -95,6 +125,7 @@ def run_phase0(
                 state = Connect4State()
                 states_enc = []
                 policies = []
+                legal_masks = []
                 
                 while True:
                     done, z = state.is_terminal()
@@ -121,12 +152,13 @@ def run_phase0(
                     
                     states_enc.append(encoded)
                     policies.append(pi)
+                    legal_masks.append(state.legal_mask())
                     state = state.apply(action)
                 
                 # Add to buffer
-                for i, (s, pi) in enumerate(zip(states_enc, policies)):
+                for i, (s, pi, legal) in enumerate(zip(states_enc, policies, legal_masks)):
                     v = result if i % 2 == 0 else -result
-                    buffer.add(s, pi, v)  # mirrored copies are drawn at sample time
+                    buffer.add(s, pi, v, legal=legal)  # mirrored copies are drawn at sample time
                 
                 game_results.append(result)
             
@@ -142,35 +174,20 @@ def run_phase0(
                 print(f"  Train: ploss={stats['mean_policy_loss']:.3f}, "
                       f"vloss={stats['mean_value_loss']:.3f}")
         
-        # Evaluate vs random every 5 iterations
+        # Evaluate both gates every 5 iterations
         if (iteration + 1) % 5 == 0:
-            eval_fn = create_evaluator(net, device=device, action_size=7)
-            
-            def agent_player(state):
-                vc = search(state, eval_fn, n_sims=n_sims,
-                          action_size=7, c_puct=1.5, add_noise=False)
-                return int(np.argmax(vc))
-            
-            def rand_player(state):
-                return random_player(state, action_size=7)
-            
-            result = arena(
-                agent_player, rand_player, Connect4State,
-                n_games=20, action_size=7,
-            )
-            
-            win_rate = result['p1_win_rate']
-            print(f"  vs Random: {result['p1_wins']}-{result['draws']}-{result['p2_wins']} "
-                  f"({win_rate:.1%})")
-            
-            if win_rate >= 0.95:
+            gates = evaluate_gates(net, device, n_sims, n_games=20)
+            _print_gates(gates, "Gate check:")
+
+            if gates['passed']:
                 elapsed = time.time() - total_start
                 print(f"\n{'='*50}")
                 print(f"PHASE 0 GATE PASSED!")
-                print(f"Agent beats random >{95}% (actual: {win_rate:.1%})")
+                print(f"Beats random {gates['random_rate']:.1%} (>{RANDOM_GATE:.0%}) and "
+                      f"greedy {gates['greedy_rate']:.1%} (>{GREEDY_GATE:.0%})")
                 print(f"Time: {elapsed/60:.1f} minutes")
                 print(f"{'='*50}")
-                
+
                 # Save checkpoint if requested
                 if save_models:
                     trainer.save_checkpoint(
@@ -179,45 +196,30 @@ def run_phase0(
                     )
                 if early_stop:
                     return True
-        
+
         iter_time = time.time() - iter_start
         print(f"  Iter time: {iter_time:.1f}s")
     
     # Final evaluation
-    eval_fn = create_evaluator(net, device=device, action_size=7)
-    
-    def agent_player(state):
-        vc = search(state, eval_fn, n_sims=n_sims,
-                  action_size=7, c_puct=1.5, add_noise=False)
-        return int(np.argmax(vc))
-    
-    def rand_player(state):
-        return random_player(state, action_size=7)
-    
-    result = arena(agent_player, rand_player, Connect4State,
-                  n_games=40, action_size=7)
-    
+    gates = evaluate_gates(net, device, n_sims, n_games=40)
     elapsed = time.time() - total_start
-    win_rate = result['p1_win_rate']
-    
+
     print(f"\n{'='*50}")
-    print(f"Final vs Random: {result['p1_wins']}-{result['draws']}-{result['p2_wins']} "
-          f"({win_rate:.1%})")
+    _print_gates(gates, "Final")
     print(f"Total time: {elapsed/60:.1f} minutes")
-    
-    if win_rate >= 0.95:
+
+    if gates['passed']:
         print("PHASE 0 GATE PASSED!")
     else:
-        print(f"Phase 0 gate not yet passed (need >95%, got {win_rate:.1%})")
-        print("Increase iterations or sims and re-run.")
-    
+        print("Phase 0 gate not yet passed. Increase iterations or sims and re-run.")
+
     print(f"{'='*50}")
-    
+
     # Save final checkpoint if requested
     if save_models:
         trainer.save_checkpoint('runs/connect4/final.pt', iteration=n_iterations-1)
-    
-    return win_rate >= 0.95
+
+    return gates['passed']
 
 
 if __name__ == '__main__':

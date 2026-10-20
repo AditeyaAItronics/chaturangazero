@@ -58,6 +58,22 @@ Because pawn promotion is forced strictly to Mantri, there are no underpromotion
 
 ---
 
+### 1.3 Terminal Rules and the Move Cap
+
+Checked after every move, from the perspective of the side to move $S$, **in this order** (`RULES.md`, `chaturanga/terminal.py`):
+
+| # | Condition | Result for $S$ |
+|---|---|---|
+| 1 | $S$ has no Raja (it was captured) | loss, $z = -1$ |
+| 2 | Both sides have only their Raja | draw, $z = 0$ |
+| 3 | $S$ has only its Raja, the opponent has more | loss, $z = -1$ |
+| 4 | $S$ has **no legal move** (stalemate) | **win, $z = +1$**: the opposite of most AlphaZero code, guarded by a unit test |
+| 5 | ply $\ge 300$ (move cap) | training: material adjudication (margin 4). Arena/evaluation: draw |
+
+There is no check, so a Raja may step onto a guarded square; it is only lost when the opponent actually captures it. There is no repetition or 50-move rule, so the cap is the **only** guarantee that a game ends, and it is enforced as a hard assertion. The fraction of games reaching the cap is logged every iteration: above ~25% means the agent has found a "shuffling" loop. Plane 12 (ply / cap) is in the input because adjudication depends on it.
+
+---
+
 ## 2. ResNet Architecture Deep-Dive
 
 The core neural network $f_\theta(s)$ is a **Dual-Head Deep Residual Convolutional Neural Network** (~2.5 million parameters).
@@ -123,7 +139,7 @@ $$f_\theta(s) = (\mathbf{p}, v)$$
 #### 1. Shared Feature Representation
 Evaluating a position ($v$) and choosing candidate moves ($\mathbf{p}$) rely on identical fundamental features:
 * Piece placement and material balance.
-* Piece mobility and pinned paths.
+* Piece mobility and lines of attack. (There are no pins: Chaturanga has no check, so a piece is never forbidden to move.)
 * King exposure and attack geometry.
 
 Sharing the 8-block trunk forces the network to learn rich, generalized representations of Chaturanga geometry that serve both evaluation and tactical selection simultaneously.
@@ -151,8 +167,10 @@ This creates catastrophic problems:
 We use a **$1 \times 1$ convolution** reducing channels from $128 \to 64$:
 $$\text{Conv2d}(128 \to 64, \text{kernel}=1): \quad 128 \times 64 \times 1 \times 1 = \mathbf{8,192} \text{ parameters}$$
 Since $64 \times 8 \times 8 = 4,096$, the output tensor of shape $(B, 64, 8, 8)$ is simply reshaped into $(B, 4096)$!
-* The spatial position $(r, f)$ naturally indexes the source square (`from_sq = r * 8 + f`).
-* The channel index $c \in [0, 63]$ indexes the destination square (`to_sq = c`).
+* The reshape is channel-major, so logit index $c \cdot 64 + (8r + f)$ is action `from_sq * 64 + to_sq`:
+* The channel index $c \in [0, 63]$ indexes the **source** square (`from_sq = c`).
+* The spatial position $(r, f)$ indexes the **destination** square (`to_sq = r * 8 + f`).
+* (Plan §3.3 describes the transposed assignment. Either works, because every logit has its own 1×1 filter; this is what `net/model.py` actually does.)
 * **Parameter reduction:** $33.5\text{M} \to 8.2\text{k}$ (**$4000\times$ fewer parameters**), with zero spatial information loss!
 
 #### Illegal Move Masking:
@@ -263,19 +281,19 @@ The training loop implements **Generalized Policy Iteration (GPI)**:
     │  Capacity: 1,000,000 position-level transitions        │
     │  Augmented via horizontal mirror reflection (2×)       │
     └───────────────────────────┬────────────────────────────┘
-                                │ Sample Mini-Batches (B=128)
+                                │ Sample Mini-Batches (B=512 cloud / 256 local)
                                 ▼
     ┌────────────────────────────────────────────────────────┐
     │                   NETWORK TRAINING                     │
     │  Minimize: L(θ) = MSE(z, v) + CrossEntropy(π, p) + L2  │
-    │  Optimizer: Adam (lr=2e-3, weight_decay=1e-4)          │
+    │  Optimizer: AdamW (lr=2e-3, decoupled decay 1e-2)      │
     └───────────────────────────┬────────────────────────────┘
                                 │ Produces Challenger θ_new
                                 ▼
     ┌────────────────────────────────────────────────────────┐
     │                      ARENA GATE                        │
-    │  Challenger vs Incumbent over 60 competitive games     │
-    │  Promote if Challenger Win Rate ≥ 55%                  │
+    │  Every 5th iteration: challenger vs incumbent, 60 games│
+    │  Promote if score ≥ 55%; the incumbent plays self-play │
     └────────────────────────────────────────────────────────┘
 ```
 
@@ -309,18 +327,19 @@ $$\mathcal{L}_{\text{policy}} = -\sum_{a} \pi(a) \log p(a) = -\boldsymbol{\pi}^\
 
 #### 3. Weight Regularization ($L_2$)
 $$\mathcal{L}_{\text{reg}} = c \|\theta\|^2 = c \sum_i w_i^2$$
-* Implemented via `weight_decay=1e-4` inside the Adam optimizer.
-* Prevents individual weights from exploding and guards against overfitting to early self-play trajectories.
+* Default: **AdamW** with decoupled weight decay (`train.weight_decay`, 1e-2) on conv/linear weights only (not BatchNorm or biases). Putting $c\|\theta\|^2$ in the loss, or using Adam's `weight_decay` (equivalent), gets rescaled by Adam's per-parameter step sizes, so the most-updated weights are barely regularised. AdamW avoids that.
+* `optimizer: adam` uses the formula above literally: the $c\|\theta\|^2$ term (`train.l2`, 1e-4) is added to the loss and logged as `l2_loss`.
+* Guards against overfitting to early self-play trajectories.
 
 ---
 
 ### 4.3 Why Does Reinforcement Learning Converge? (The Distillation Cycle)
 
 The AlphaZero learning cycle forms a **virtuous policy iteration flywheel**:
-1. **MCTS is a Policy Improver:** Even when guided by a randomly initialized network, running 100 MCTS simulations produces a visit distribution $\boldsymbol{\pi}$ that is strictly stronger than the network's raw policy $\mathbf{p}$ ($\boldsymbol{\pi} \succ \mathbf{p}$).
+1. **MCTS is a Policy Improver:** Lookahead search with the network's own priors and values usually produces a visit distribution $\boldsymbol{\pi}$ that is stronger than the raw policy $\mathbf{p}$. This holds in practice, not as a theorem, and it is weakest when the value head is still poor.
 2. **Supervised Distillation:** Training the ResNet on $(s, \boldsymbol{\pi})$ distills the tactical lookahead of MCTS into the network's convolutional parameters.
 3. **Compound Strength:** In the next iteration, MCTS starts with a stronger baseline policy. Search explores deeper, more complex tactical lines, generating an even higher-quality target $\boldsymbol{\pi}'$.
-4. **Outcome Convergence:** Repeated over 300 iterations, this loop converges toward near-optimal minimax play without a single human demonstration.
+4. **Iterated improvement:** Repeated over many iterations, the loop improves play without any human demonstrations. There is no guarantee of reaching optimal play. Progress is measured, not assumed: by the Elo ladder across checkpoints and by win rates against the random, greedy and 3-ply alpha-beta baselines (the plan's success criteria).
 
 ---
 
@@ -330,39 +349,48 @@ In naive AlphaZero implementations, each MCTS worker runs its own neural network
 $$\text{Latency} \approx M \times T \times \text{forward\_pass\_time}$$
 For 100 simulations across 80 plies, a single game requires 8,000 sequential GPU kernel launches. Because batch size is 1, the GPU's Tensor Cores are severely under-utilized ($< 5\%$ compute capacity).
 
-### 5.1 The 128-Game Parallel Batched Server (`pipeline/inference_server.py`)
+### 5.1 Parallel-games batched self-play (`pipeline/inference_server.py`)
 
-To achieve maximum GPU throughput, we architected an **asynchronous batched inference server**:
+The server is **single-threaded and lockstep**, not a queue of worker threads: one Python loop drives every concurrent game.
 
 ```
-Game Worker 01 ──┐
-Game Worker 02 ──┤
-     ...         ┼──► [Thread-Safe Leaf Request Queue]
-Game Worker 128 ─┘                  │
-                                    ▼
-                     ┌─────────────────────────────┐
-                     │   Batched Inference Loop    │
-                     │  Gathers up to 128 requests │
-                     │  Tensor Batch: (128, 14, 8, 8)│
-                     │  FP16 AMP Forward Pass on T4 │
-                     └──────────────┬──────────────┘
-                                    │
-                                    ▼
-                     [Dispatches Results to Workers]
+for each move:
+    for each simulation step:
+        for each active game (G of them):
+            descend its tree with PUCT up to `leaves_per_step` times
+            (virtual loss on each pending path so the descents spread out)
+            leaf already terminal / in the evaluation cache?  -> back up now, no GPU
+            otherwise                                         -> queue the leaf
+        ONE forward pass on all queued leaves  (batch ≈ G × leaves_per_step, FP16 AMP on CUDA)
+        expand + back up every queued leaf; revert virtual loss
+    every game picks its move; finished games are recycled with fresh roots,
+    and all new roots are expanded in one more batched pass
 ```
 
-1. **Worker Threads:** 128 concurrent game workers run MCTS in parallel CPU threads.
-2. **Queue Aggregation:** When any MCTS tree reaches a leaf node, it pushes the state tensor to a thread-safe request queue and awaits a response.
-3. **Dynamic Batching:** The GPU server gathers available requests (up to batch size 128) and executes a single forward pass with **Automatic Mixed Precision (FP16)**.
-4. **Dispatch:** Policy logits and value estimates are sliced and returned to their respective worker threads.
+Pieces:
 
-### 5.2 Performance Impact
+1. **Lockstep batching:** `loop.parallel_games` games share each forward pass.
+2. **Virtual loss** (`mcts.leaves_per_step`, `mcts.virtual_loss`): more than one leaf per game per batch keeps the batch large when few games remain. The default of 1 is plain MCTS.
+3. **Evaluation cache** (`search/cache.py`, `mcts.eval_cache_size`): positions that recur within a run (transpositions, shared openings across games) skip the network. Each tree keeps its own visit statistics.
+4. **Worker processes** (`pipeline/workers.py`, `loop.workers`): the tree work is Python on one core, so self-play is split across processes. Each runs its own batched server and returns a compact replay buffer.
+5. **Batched arena** (`run_batched_arena`): gating games also run concurrently, with one forward pass per network per simulation step.
 
-| Metric | Sequential MCTS (Naive) | Parallel Batched Server | Improvement |
-| :--- | :---: | :---: | :---: |
-| **GPU Utilization** | $3 - 7\%$ | $85 - 95\%$ | **~15× higher** |
-| **Throughput (Games/Hour)** | ~18 games/hour | ~650 games/hour | **~35× speedup** |
-| **Total Games in 600 GPU-h** | ~10,800 games | ~390,000 games | **Sufficient for master play** |
+### 5.2 Performance: what is and isn't measured
+
+**Not yet measured:** end-to-end games/hour on a GPU, and GPU utilisation. Earlier versions of this section showed "~35×" and "650 games/hour". Those were the planning estimates from `IMPLEMENTATION_PLAN.md` §2.4, not measurements, and have been removed. Measure them on the training machine with a short self-play run before choosing a compute tier (Phase 4 gate).
+
+**Measured:** the pure-Python core (no network), with `python tools/bench_core.py` on the development CPU, before and after the needtofix S1–S7 optimisations:
+
+| Core metric (pure Python, no network) | Before | After | Speed-up |
+| :--- | ---: | ---: | :---: |
+| Legal-move generation (positions/s) | 16.7k | 83.2k | 4–7× |
+| Terminal check (positions/s) | 12.7k | 41.0k | 3–4× |
+| Board encoding (positions/s) | 43.0k | 90.0k | 2–3× |
+| **MCTS simulations/s** (dummy evaluator) | 3,050 | 9,755 | **2.4–5.9×** |
+| **Memory per MCTS node** | 50.7 KB | 2.3 KB | **22× smaller** |
+| `perft(start, 4)` | 2.04 s | 0.12 s | 12–17× |
+
+Best of two runs each, on a laptop CPU whose timings vary about 2× between runs. The speed-up column is the range of the per-run ratios. Search results are unchanged: identical MCTS visit counts on 40 test positions, identical move lists on 3,000, byte-identical encodings, and production perft still matches the frozen depth-5/6 reference numbers. These core numbers are an upper bound on the self-play speed-up, which also includes network time. Measure games/hour on the training machine.
 
 ---
 
@@ -381,5 +409,7 @@ Game Worker 128 ─┘                  │
 | **Dirichlet Noise** | $(\alpha, \epsilon)$ | $(0.3, 0.25)$ | Injects root exploration to diversify self-play |
 | **Temperature** | $\tau$ | $1.0 \to 0.0$ | Stochastic in first 20 plies; greedy thereafter |
 | **Replay Buffer Size** | $|\mathcal{B}|$ | $1,000,000$ | Uniform position-level sampling with mirror symmetry |
-| **Learning Rate** | $\eta$ | $2 \times 10^{-3}$ | Adam optimizer with gradient clipping ($1.0$) |
-| **Weight Decay** | $c$ | $1 \times 10^{-4}$ | $L_2$ regularization on network parameters |
+| **Learning Rate** | $\eta$ | $2 \times 10^{-3}$ | AdamW, gradient clipping 1.0, ×0.1 at iterations 80 and 200 |
+| **Weight Decay** | — | $1 \times 10^{-2}$ | AdamW decoupled decay on conv/linear weights (`optimizer: adam` uses $c = 10^{-4}$ in the loss instead) |
+| **Batch Size** | $B$ | 512 / 256 | cloud / local |
+| **Move Cap** | — | 300 plies | Sole termination guarantee; training games adjudicated on material (margin 4) |
