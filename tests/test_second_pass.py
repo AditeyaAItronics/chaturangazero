@@ -148,3 +148,142 @@ def test_n13_web_reports_capped_game_as_draw():
     web_app.current_session.state = state.apply(state.legal_moves()[0])
     data = web_app.serialize_state(web_app.current_session)
     assert data['is_terminal'] and data['result'] == 0.0 and data['terminal_reason'] == 'move_cap'
+
+
+# --- N2: an interrupted iteration is redone, not skipped --------------------
+
+def _tiny_connect4_config(iterations: int, arena_every: int) -> dict:
+    return {
+        'game': 'connect4', 'seed': 1, 'device': 'cpu',
+        'net': {'blocks': 1, 'channels': 8, 'action_space': 7, 'input_planes': 3},
+        'mcts': {'sims': 4, 'c_puct': 1.5, 'dirichlet_alpha': 1.0, 'dirichlet_eps': 0.25},
+        'play': {'temp_moves': 4, 'move_cap': 42},
+        'train': {'lr': 1e-3, 'l2': 1e-4, 'batch_size': 16, 'buffer_size': 1000,
+                  'steps_per_iter': 2, 'grad_clip': 1.0, 'amp_inference': False,
+                  'mirror_augment': True},
+        'arena': {'games': 2, 'win_threshold': 0.55, 'every_n_iters': arena_every,
+                  'opening_plies': 2},
+        'loop': {'games_per_iter': 4, 'iterations': iterations, 'parallel_games': 4},
+    }
+
+
+def test_n2_kill_during_arena_redoes_the_iteration(tmp_path, monkeypatch):
+    import json
+    import pipeline.loop as loop
+    from net.replay import ReplayBuffer
+    from pipeline.resume import read_run_state
+
+    out = str(tmp_path / 'run')
+    real_arena = loop.run_batched_arena
+
+    class Preempted(Exception):
+        pass
+
+    def killed_in_arena(*args, **kwargs):
+        raise Preempted()
+
+    # Iteration 1 is a gating iteration (every 2); the "VM dies" during its arena,
+    # after checkpoint_0001.pt and the buffer snapshot are already on disk.
+    monkeypatch.setattr(loop, 'run_batched_arena', killed_in_arena)
+    with pytest.raises(Preempted):
+        loop.training_loop(_tiny_connect4_config(iterations=2, arena_every=2), output_dir=out)
+    assert os.path.exists(os.path.join(out, 'checkpoint_0001.pt'))
+    marker = read_run_state(out)
+    assert marker['last_completed_iteration'] == 0
+    on_disk = ReplayBuffer(max_size=1000)
+    on_disk.load(os.path.join(out, 'buffer.npz'))
+    assert on_disk.total_added > marker['buffer_total_added'], "scenario: snapshot is ahead"
+
+    monkeypatch.setattr(loop, 'run_batched_arena', real_arena)
+    loop.training_loop(_tiny_connect4_config(iterations=2, arena_every=2), output_dir=out,
+                       resume_from='auto')
+
+    with open(os.path.join(out, 'metrics.json')) as f:
+        metrics = json.load(f)
+    assert [m['iteration'] for m in metrics] == [0, 1]
+    assert 'arena' in metrics[1], "the gate of the interrupted iteration never ran"
+    marker = read_run_state(out)
+    assert marker['last_completed_iteration'] == 1
+    final = ReplayBuffer(max_size=1000)
+    final.load(os.path.join(out, 'buffer.npz'))
+    assert final.total_added == marker['buffer_total_added'] == len(final), \
+        "the interrupted iteration's positions were kept and then added again"
+
+
+def test_n2_latest_checkpoint_trusts_the_marker(tmp_path):
+    import torch
+    from pipeline.resume import latest_checkpoint, write_run_state
+    for i in range(3):
+        torch.save({'iteration': i}, tmp_path / f'checkpoint_{i:04d}.pt')
+    assert latest_checkpoint(str(tmp_path)).endswith('checkpoint_0002.pt')   # no marker: newest
+    write_run_state(str(tmp_path), {'last_completed_iteration': 1})
+    assert latest_checkpoint(str(tmp_path)).endswith('checkpoint_0001.pt')   # 0002 incomplete
+    write_run_state(str(tmp_path), {'last_completed_iteration': 7})         # marker's file missing
+    assert latest_checkpoint(str(tmp_path)).endswith('checkpoint_0002.pt')
+    # Marker's checkpoint unreadable: fall back to an EARLIER one, never the
+    # newer checkpoint of the cut-short iteration
+    write_run_state(str(tmp_path), {'last_completed_iteration': 1})
+    (tmp_path / 'checkpoint_0001.pt').write_bytes(b'corrupt')
+    assert latest_checkpoint(str(tmp_path)).endswith('checkpoint_0000.pt')
+    (tmp_path / 'run_state.json').write_text('{not json')                   # corrupt marker
+    assert latest_checkpoint(str(tmp_path)).endswith('checkpoint_0002.pt')
+
+
+def test_n2_resume_with_sparse_buffer_snapshots(tmp_path, monkeypatch):
+    """buffer_snapshot_every=2: the only snapshot is written by the interrupted
+    iteration. Resume must keep iteration 0's games (they were never snapshotted
+    otherwise) and drop iteration 1's."""
+    import pipeline.loop as loop
+    from net.replay import ReplayBuffer
+    from pipeline.resume import read_run_state
+
+    out = str(tmp_path / 'run')
+    config = _tiny_connect4_config(iterations=2, arena_every=2)
+    config['cloud'] = {'buffer_snapshot_every': 2}
+    real_arena = loop.run_batched_arena
+
+    def killed_in_arena(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(loop, 'run_batched_arena', killed_in_arena)
+    with pytest.raises(KeyboardInterrupt):
+        loop.training_loop(config, output_dir=out)
+    t0 = read_run_state(out)['buffer_total_added']
+    monkeypatch.setattr(loop, 'run_batched_arena', real_arena)
+    kept = []
+    real_drop = ReplayBuffer.drop_newest
+
+    def spy(self, k):
+        real_drop(self, k)
+        kept.append(self.total_added)
+
+    monkeypatch.setattr(ReplayBuffer, 'drop_newest', spy)
+    loop.training_loop(config, output_dir=out, resume_from='auto')
+    assert kept == [t0], "resume should cut the buffer back to exactly iteration 0's games"
+    final = ReplayBuffer(max_size=1000)
+    final.load(os.path.join(out, 'buffer.npz'))
+    assert final.total_added == read_run_state(out)['buffer_total_added'] == len(final)
+
+
+@pytest.mark.parametrize('n_added', [5, 10, 13])
+def test_n2_drop_newest_and_total_added_survive_save_load(tmp_path, n_added):
+    from net.replay import ReplayBuffer
+    buf = ReplayBuffer(max_size=10)
+    for i in range(n_added):
+        state = np.zeros((3, 6, 7), np.float32)
+        state[0, 0, 0] = i % 2
+        pi = np.zeros(7, np.float32)
+        pi[i % 7] = 1.0
+        buf.add(state, pi, float(i))           # value = insertion index, to track order
+    buf.save(str(tmp_path / 'b.npz'))
+    loaded = ReplayBuffer(max_size=10)
+    loaded.load(str(tmp_path / 'b.npz'))
+    assert loaded.total_added == n_added
+    loaded.drop_newest(3)
+    assert loaded.total_added == n_added - 3
+    kept = sorted(loaded._values[:len(loaded)].tolist())
+    expected = list(range(max(0, n_added - 10), n_added - 3))
+    assert kept == expected
+    # Adding after a drop continues the ring correctly
+    loaded.add(np.zeros((3, 6, 7), np.float32), np.eye(7, dtype=np.float32)[0], 99.0)
+    assert len(loaded) == min(len(expected) + 1, 10) and 99.0 in loaded._values

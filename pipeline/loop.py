@@ -133,7 +133,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     # Create output directory, restoring it from the bucket on a fresh VM
     os.makedirs(output_dir, exist_ok=True)
     from pipeline import gcs
-    from pipeline.resume import latest_checkpoint
+    from pipeline.resume import latest_checkpoint, read_run_state, write_run_state
     if sync_to:
         print(f"Restoring run directory from {sync_to} ...", flush=True)
         gcs.pull(sync_to, output_dir)
@@ -219,6 +219,18 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         if os.path.exists(buffer_path):
             buffer.load(buffer_path)
             print(f"Loaded buffer with {len(buffer)} positions")
+            # N2: a snapshot written by an iteration that was then cut short is
+            # ahead of the last completed iteration. That iteration is redone,
+            # so drop its positions instead of adding them twice.
+            run_state = read_run_state(output_dir)
+            if (run_state is not None
+                    and run_state.get('last_completed_iteration') == start_iteration - 1
+                    and 'buffer_total_added' in run_state):
+                excess = buffer.total_added - int(run_state['buffer_total_added'])
+                if excess > 0:
+                    buffer.drop_newest(excess)
+                    print(f"Dropped {excess} positions from the interrupted iteration "
+                          f"{start_iteration}; buffer now {len(buffer)}")
     
     # Training config
     n_iterations = config['loop']['iterations']
@@ -402,6 +414,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             print(f"  Snapshot saved to {buf_path}", flush=True)
         
         # 4. Arena gating
+        arena_record = None
         if (iteration + 1) % arena_every == 0 and best_net_path:
             print(f"Arena Gating: {arena_games} games vs best incumbent...", flush=True)
             
@@ -425,7 +438,17 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             if promoted:
                 best_net.load_state_dict(net.state_dict())
                 best_net.eval()
+                # Written before the commit marker: if the run dies between here and
+                # the marker, the redone iteration keeps this promoted incumbent. It
+                # did win its gate, so that is kept on purpose (N2); its checkpoint
+                # records the iteration it came from.
                 trainer.save_checkpoint(best_net_path, iteration=iteration)
+            arena_record = {
+                'games': arena_games,
+                'wins': arena_stats['p1_wins'], 'draws': arena_stats['draws'],
+                'losses': arena_stats['p2_wins'], 'score': arena_stats['p1_win_rate'],
+                'promoted': bool(promoted),
+            }
         
         # Log metrics
         iter_elapsed = time.time() - iter_start
@@ -441,11 +464,21 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         }
         if train_stats:
             metrics.update(train_stats)
+        if arena_record is not None:
+            metrics['arena'] = arena_record
         metrics_log.append(metrics)
         
-        # Save metrics, then sync the whole run directory (checkpoint, best.pt,
-        # buffer snapshot, metrics) so a lost VM costs at most this iteration
+        # Save metrics, then the commit marker LAST (N2): only an iteration
+        # whose checkpoint, buffer, arena gate and metrics are all written
+        # counts as completed, so a kill anywhere before this line makes
+        # resume redo the whole iteration instead of skipping its gate.
+        # Then sync the run directory, so a lost VM costs at most this iteration.
         _write_json_atomic(metrics_path, metrics_log)
+        write_run_state(output_dir, {
+            'last_completed_iteration': iteration,
+            'buffer_total_added': buffer.total_added,
+            'checkpoint': os.path.basename(ckpt_path),
+        })
         if sync_to:
             gcs.push(output_dir, sync_to)
                 

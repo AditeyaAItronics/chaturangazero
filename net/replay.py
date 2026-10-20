@@ -249,6 +249,7 @@ class ReplayBuffer:
         np.savez_compressed(
             path,
             size=np.array(n),
+            total_added=np.array(self._total_added),
             shape=np.array(self._shape),
             action_size=np.array(self._action_size),
             bits=self._bits[order],
@@ -302,7 +303,36 @@ class ReplayBuffer:
                 self._legal[k] = legal_idx[legal_offsets[start + k]:legal_offsets[start + k + 1]]
             else:   # saved before legal moves were stored
                 self._legal[k] = self._pi_idx[k]
-        self._added_at[:m] = np.arange(m)
+        # Restore the true add counter (buffer age, and resume's N2 check);
+        # files saved before it was stored count only what they hold.
+        total = int(data['total_added']) if 'total_added' in data else n
+        self._added_at[:m] = np.arange(total - m, total)
         self._size = m
-        self._total_added = m
+        self._total_added = total
         self._next = m % self.max_size
+
+    @property
+    def total_added(self) -> int:
+        """Positions ever added (monotone; survives save/load)."""
+        return self._total_added
+
+    def drop_newest(self, k: int):
+        """
+        Remove the k most recently added positions. Used on resume when the
+        buffer snapshot on disk is ahead of the last completed iteration
+        (needtofixagain N2), so an interrupted iteration's games aren't
+        added twice when it is redone.
+        """
+        k = min(int(k), len(self))
+        if k <= 0:
+            return
+        if len(self) == self.max_size and k < len(self):
+            # Full ring: compact oldest -> newest first, so the newest k sit at the end
+            order = self._ordered_slots()
+            for arr in (self._bits, self._consts, self._is_const, self._values,
+                        self._added_at, self._pi_idx, self._pi_val, self._legal):
+                arr[:] = arr[order]
+            self._next = 0
+        self._size -= k
+        self._next = self._size % self.max_size
+        self._total_added -= k

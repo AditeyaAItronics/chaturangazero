@@ -11,8 +11,10 @@ confirm clean resume each time." This reproduces that on one machine:
   * it is restarted with `--resume auto --sync-to <bucket>`, exactly as
     infra/startup.sh does on a fresh VM,
   * after the kills, the run is allowed to finish, then the bucket is checked:
-    every iteration present exactly once and in order, checkpoints, best.pt and
-    the buffer snapshot all load.
+    every iteration present exactly once and in order, every gating iteration
+    has an arena result (a kill during the arena must not skip the gate,
+    needtofixagain N2), the commit marker names the last iteration, and
+    checkpoints, best.pt and the buffer snapshot all load.
 
 Usage:
     python tools/soak_test.py                 # 3 hard kills (works on Windows)
@@ -52,12 +54,16 @@ def _start(config_path, work, bucket, log):
     return subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
 
 
-def _completed_iterations(bucket):
+def _metrics(bucket):
     path = os.path.join(bucket, 'metrics.json')
     if not os.path.exists(path):
         return []
     with open(path) as f:
-        return [m['iteration'] for m in json.load(f)]
+        return json.load(f)
+
+
+def _completed_iterations(bucket):
+    return [m['iteration'] for m in _metrics(bucket)]
 
 
 def main():
@@ -123,6 +129,19 @@ def main():
     expected = list(range(args.iterations))
     ok = iterations == expected
     print(f"Iterations in metrics.json: {iterations}  ({'OK' if ok else 'expected ' + str(expected)})")
+    import yaml
+    with open(config_path) as f:
+        arena_every = yaml.safe_load(f)['arena']['every_n_iters']
+    gates = [m['iteration'] for m in _metrics(bucket) if 'arena' in m]
+    expected_gates = [i for i in expected if (i + 1) % arena_every == 0]
+    gates_ok = gates == expected_gates
+    print(f"Iterations with an arena result: {gates}  "
+          f"({'OK' if gates_ok else 'expected ' + str(expected_gates)})")
+    with open(os.path.join(bucket, 'run_state.json')) as f:
+        marker = json.load(f)
+    marker_ok = marker.get('last_completed_iteration') == args.iterations - 1
+    print(f"run_state.json: last completed iteration {marker.get('last_completed_iteration')}  "
+          f"({'OK' if marker_ok else 'expected ' + str(args.iterations - 1)})")
     for name in [f'checkpoint_{args.iterations - 1:04d}.pt', 'best.pt']:
         ckpt = torch.load(os.path.join(bucket, name), map_location='cpu', weights_only=False)
         print(f"{name}: loads, iteration {ckpt.get('iteration')}")
@@ -132,7 +151,11 @@ def main():
     with open(log_path) as f:
         resumes = sum('Auto-resume: ' in line and 'starting fresh' not in line for line in f)
     print(f"Kills: {kills}, automatic resumes: {resumes}")
-    passed = ok and kills == args.kills and resumes == args.kills and len(buf) > 0
+    no_duplicates = buf.total_added == marker.get('buffer_total_added')
+    print(f"buffer positions added {buf.total_added}, marker {marker.get('buffer_total_added')}  "
+          f"({'OK' if no_duplicates else 'interrupted iterations were added twice'})")
+    passed = (ok and gates_ok and marker_ok and no_duplicates
+              and kills == args.kills and resumes == args.kills and len(buf) > 0)
     print("SOAK TEST PASSED" if passed else f"SOAK TEST FAILED (log: {log_path})")
     if passed and not args.bucket:
         shutil.rmtree(tmp, ignore_errors=True)
