@@ -781,3 +781,41 @@ def test_n14_missing_checkpoint_is_labelled_not_disguised(web_client, tmp_path, 
     r = client.post('/api/ai_move')
     assert r.status_code == 200
     assert 'played a random move' in r.get_json()['ai_stats']['note']
+
+
+# --- N16: eval/elo.py plots handle iterations without training stats --------
+
+_METRICS_WARMUP_FIRST = [
+    {'iteration': 0, 'avg_plies': 20.0, 'cap_rate': 0.0},              # warm-up: no losses
+    {'iteration': 1, 'avg_plies': 25.0, 'cap_rate': 0.0,
+     'mean_policy_loss': 3.0, 'mean_value_loss': 0.9, 'mean_entropy': 2.0},
+]
+
+
+def test_n16_loss_plot_drawn_when_iteration_0_skipped_training(tmp_path):
+    import json
+    pytest.importorskip('matplotlib')
+    from eval.elo import generate_plots
+    path = tmp_path / 'metrics.json'
+    path.write_text(json.dumps(_METRICS_WARMUP_FIRST))
+    generate_plots(str(path), str(tmp_path / 'plots'))
+    assert (tmp_path / 'plots' / 'loss_curves.png').exists(), "loss plot skipped (checked metrics[0] only)"
+
+
+def test_n16_text_fallback_without_matplotlib(tmp_path, monkeypatch, capsys):
+    import builtins
+    import json
+    from eval.elo import generate_plots
+    real_import = builtins.__import__
+
+    def no_matplotlib(name, *args, **kwargs):
+        if name.startswith('matplotlib'):
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', no_matplotlib)
+    path = tmp_path / 'metrics.json'
+    path.write_text(json.dumps(_METRICS_WARMUP_FIRST))
+    generate_plots(str(path), str(tmp_path / 'plots'))           # used to raise ValueError
+    out = capsys.readouterr().out
+    assert 'Iter 0: policy_loss=nan' in out and 'Iter 1: policy_loss=3.0000' in out

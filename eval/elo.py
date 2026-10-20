@@ -138,6 +138,11 @@ def generate_plots(metrics_path: str, output_dir: str):
         metrics = json.load(f)
     
     os.makedirs(output_dir, exist_ok=True)
+
+    def logged(key):
+        # Any iteration, not just the first: iteration 0 often skips training
+        # (warm-up / buffer too small) and has no loss keys (needtofixagain N16)
+        return any(key in m for m in metrics)
     
     try:
         import matplotlib
@@ -147,11 +152,11 @@ def generate_plots(metrics_path: str, output_dir: str):
         iterations = [m['iteration'] for m in metrics]
         
         # Loss curves
-        if 'mean_policy_loss' in metrics[0]:
+        if logged('mean_policy_loss'):
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
             
-            p_loss = [m.get('mean_policy_loss', 0) for m in metrics]
-            v_loss = [m.get('mean_value_loss', 0) for m in metrics]
+            p_loss = [m.get('mean_policy_loss', np.nan) for m in metrics]
+            v_loss = [m.get('mean_value_loss', np.nan) for m in metrics]
             
             ax1.plot(iterations, p_loss, label='Policy Loss')
             ax1.plot(iterations, v_loss, label='Value Loss')
@@ -161,7 +166,7 @@ def generate_plots(metrics_path: str, output_dir: str):
             ax1.legend()
             ax1.grid(True)
             
-            entropy = [m.get('mean_entropy', 0) for m in metrics]
+            entropy = [m.get('mean_entropy', np.nan) for m in metrics]
             ax2.plot(iterations, entropy, color='green')
             ax2.set_xlabel('Iteration')
             ax2.set_ylabel('Entropy')
@@ -173,9 +178,9 @@ def generate_plots(metrics_path: str, output_dir: str):
             plt.close()
         
         # Game length
-        if 'avg_plies' in metrics[0]:
+        if logged('avg_plies'):
             fig, ax = plt.subplots(figsize=(8, 5))
-            plies = [m['avg_plies'] for m in metrics]
+            plies = [m.get('avg_plies', np.nan) for m in metrics]
             ax.plot(iterations, plies)
             ax.set_xlabel('Iteration')
             ax.set_ylabel('Average Plies')
@@ -185,9 +190,9 @@ def generate_plots(metrics_path: str, output_dir: str):
             plt.close()
         
         # Cap rate
-        if 'cap_rate' in metrics[0]:
+        if logged('cap_rate'):
             fig, ax = plt.subplots(figsize=(8, 5))
-            cap = [m['cap_rate'] for m in metrics]
+            cap = [m.get('cap_rate', np.nan) for m in metrics]
             ax.plot(iterations, cap)
             ax.axhline(y=0.25, color='r', linestyle='--', label='Warning threshold')
             ax.set_xlabel('Iteration')
@@ -203,10 +208,11 @@ def generate_plots(metrics_path: str, output_dir: str):
     except ImportError:
         print("matplotlib not available, printing text summaries")
         for m in metrics[-5:]:
+            # NaN, not '?', for a missing value: '?' can't take a float format
             print(f"  Iter {m['iteration']}: "
-                  f"policy_loss={m.get('mean_policy_loss', '?'):.4f}, "
-                  f"value_loss={m.get('mean_value_loss', '?'):.4f}, "
-                  f"avg_plies={m.get('avg_plies', '?'):.1f}")
+                  f"policy_loss={m.get('mean_policy_loss', float('nan')):.4f}, "
+                  f"value_loss={m.get('mean_value_loss', float('nan')):.4f}, "
+                  f"avg_plies={m.get('avg_plies', float('nan')):.1f}")
 
 
 def plot_elo_curve(elo_history: list[tuple[int, float]], output_path: str):
