@@ -443,12 +443,13 @@ def test_n4_watchdog_quiet_while_training_progresses(tmp_path):
 def _run_training_wrapper(tmp_path, exit_code: int, mig: str = 'cz-train-mig'):
     import subprocess
     bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     calls = tmp_path / 'gcloud_calls'
     stub = bin_dir / 'gcloud'
     stub.write_text(f'#!/usr/bin/env bash\necho "$@" >> "{calls.as_posix()}"\n', newline='\n')
     stub.chmod(0o755)
-    env = dict(os.environ, CZ_MIG=mig, CZ_ZONE='us-central1-a')
+    env = dict(os.environ, CZ_MIG=mig, CZ_ZONE='us-central1-a',
+               CZ_FAILURE_FILE=(tmp_path / 'fast_failures').as_posix())
     env['PATH'] = bin_dir.as_posix() + os.pathsep + env.get('PATH', '')
     script = (f'export PATH="{bin_dir.as_posix()}:$PATH"; '
               f'bash "{os.path.join(INFRA, "run_training.sh")}" bash -c "exit {exit_code}"')
@@ -467,6 +468,24 @@ def test_n4_finished_run_resizes_the_group_to_zero(tmp_path):
 def test_n4_crash_or_preemption_does_not_resize(tmp_path, exit_code):
     code, calls = _run_training_wrapper(tmp_path, exit_code=exit_code)
     assert code == exit_code and calls == '', "only a finished run may stop the group"
+
+
+def test_n8_repeated_fast_crashes_stop_the_group(tmp_path):
+    """A crash that repeats on every start (bad config) must not cycle VMs forever."""
+    for attempt in range(1, 6):
+        code, calls = _run_training_wrapper(tmp_path, exit_code=1)
+        assert code == 1
+        if attempt < 5:
+            assert calls == '', f"resized after only {attempt} failures"
+    assert 'instance-groups managed resize cz-train-mig --size 0' in calls
+
+
+def test_n8_preemption_resets_the_fast_failure_count(tmp_path):
+    for _ in range(4):
+        _run_training_wrapper(tmp_path, exit_code=1)
+    _run_training_wrapper(tmp_path, exit_code=143)            # a preemption in between
+    code, calls = _run_training_wrapper(tmp_path, exit_code=1)
+    assert calls == '', "failures separated by a preemption are not 'in a row'"
 
 
 def test_n4_no_mig_no_resize(tmp_path):
@@ -662,3 +681,26 @@ def test_n3_human_cannot_move_for_the_ai(web_client):
     web_app.current_session.p1_type = 'human'
     r = client.post('/api/make_move', json={'action': State().legal_moves()[0]})
     assert r.status_code == 200
+
+
+# --- N8: a config's rules: block must match the engine ----------------------
+
+@pytest.mark.parametrize('name', ['cloud.yaml', 'local.yaml'])
+def test_n8_shipped_configs_match_the_engine(name):
+    from chaturanga.board import check_ruleset
+    from pipeline.loop import load_config
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    check_ruleset(load_config(os.path.join(root, 'configs', name))['rules'])
+
+
+@pytest.mark.parametrize('change', [{'stalemate': 'loss'}, {'bare_king': 'draw'},
+                                    {'repetition_draw': True}, {'en_passant': True}])
+def test_n8_a_rule_edit_in_yaml_fails_loudly(tmp_path, change):
+    from chaturanga.board import RULESET
+    from pipeline.loop import load_config, training_loop
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    config = load_config(os.path.join(root, 'configs', 'local.yaml'))
+    config['rules'] = {**RULESET, **change}
+    with pytest.raises(ValueError, match='does not match the engine'):
+        training_loop(config, output_dir=str(tmp_path / 'run'), device='cpu')
+    assert not (tmp_path / 'run' / 'config.yaml').exists(), "rejected before writing anything"

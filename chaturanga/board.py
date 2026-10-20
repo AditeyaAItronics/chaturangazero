@@ -56,6 +56,37 @@ ADJUDICATE_MARGIN = 4.0      # default; the live value comes from get_adjudicate
 _RULES = {'move_cap': MOVE_CAP, 'adjudicate_margin': ADJUDICATE_MARGIN}
 
 
+# The ruleset the engine implements (RULES.md §2.1). These are not settings:
+# changing a game rule means changing the engine and RULES.md (4 sign-offs).
+# A config's `rules:` block is checked against this, so editing the YAML can
+# never silently claim a rule the engine doesn't play (needtofixagain N8).
+RULESET = {
+    'castling': False,
+    'pawn_double_step': False,
+    'promotion': 'mantri_only',
+    'check_rule': 'none',
+    'stalemate': 'side_to_move_wins',
+    'repetition_draw': False,
+    'fifty_move_rule': False,
+    'bare_king': 'loss',
+}
+
+
+def check_ruleset(rules: Optional[dict]) -> None:
+    """Raise ValueError if a config's `rules:` block disagrees with RULESET. None is allowed."""
+    if rules is None:
+        return
+    problems = []
+    for key, value in rules.items():
+        if key not in RULESET:
+            problems.append(f"unknown rule {key!r}")
+        elif value != RULESET[key]:
+            problems.append(f"{key}: config says {value!r}, the engine plays {RULESET[key]!r}")
+    if problems:
+        raise ValueError("config 'rules:' block does not match the engine (RULES.md §2.1): "
+                         + "; ".join(problems) + ". Game rules are fixed in code, not config.")
+
+
 def configure_rules(move_cap: Optional[int] = None,
                     adjudicate_margin: Optional[float] = None) -> None:
     """Set the move cap and material-adjudication margin; None keeps the current value."""

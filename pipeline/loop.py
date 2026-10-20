@@ -145,6 +145,11 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     """
     # Setup
     game_type = config.get('game', 'chaturanga')
+    if game_type != 'connect4':
+        # The config's rules: block must match the engine, or fail loudly
+        # before anything is written to the run directory (N8)
+        from chaturanga.board import check_ruleset
+        check_ruleset(config.get('rules'))
     seed = config.get('seed', 42)
     random.seed(seed)          # replay sampling / any stdlib randomness
     np.random.seed(seed)
