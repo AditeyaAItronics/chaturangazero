@@ -20,7 +20,7 @@ from typing import Optional
 from pathlib import Path
 
 from net.model import DualHeadNet, create_chaturanga_net, create_connect4_net
-from net.replay import ReplayBuffer
+from net.replay import ReplayBuffer, list_shards, load_shards, prune_shards, save_shard
 from net.train import Trainer, create_evaluator
 from search.arena import gate_model, score_interval
 from search.baselines import random_player
@@ -231,6 +231,12 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     mirror_augment = config['train'].get('mirror_augment', True)
     buffer = ReplayBuffer(max_size=config['train']['buffer_size'],
                           mirror_perm=mirror_perm if mirror_augment else None)
+    # 'single': the whole buffer in buffer.npz each snapshot; 'shards': only the
+    # new positions, in buffer/iter_NNNN.npz (needtofixagain N20)
+    buffer_format = config.get('cloud', {}).get('buffer_format', 'single')
+    loaded_from_shards = False
+    if buffer_format not in ('single', 'shards'):
+        raise ValueError(f"cloud.buffer_format must be 'single' or 'shards', got {buffer_format!r}")
     
     # Resume from checkpoint if specified
     start_iteration = 0
@@ -248,7 +254,14 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         
         # Load buffer if available
         buffer_path = os.path.join(output_dir, 'buffer.npz')
-        if os.path.exists(buffer_path):
+        shard_dir = os.path.join(output_dir, 'buffer')
+        if buffer_format == 'shards' and list_shards(shard_dir):
+            # Only shards up to the last completed iteration (N20): a shard from
+            # the cut-short iteration is ignored here and overwritten when redone
+            n_shards = load_shards(buffer, shard_dir, last_iteration=start_iteration - 1)
+            loaded_from_shards = True
+            print(f"Loaded buffer with {len(buffer)} positions from {n_shards} shards")
+        elif os.path.exists(buffer_path):
             buffer.load(buffer_path)
             print(f"Loaded buffer with {len(buffer)} positions")
             # N2: a snapshot written by an iteration that was then cut short is
@@ -325,6 +338,9 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     if run_state is not None and run_state.get('last_completed_iteration') == start_iteration - 1:
         trained_upto = min(buffer.total_added, int(run_state.get('trained_upto', trained_upto)))
     trained_since_gate = False
+    # Next buffer shard starts here (N20). If the buffer came from buffer.npz
+    # (a run switching to shards), the first shard must hold all of it.
+    shard_since = buffer.total_added if loaded_from_shards else buffer.total_added - len(buffer)
     # One worker pool for the whole run (N7): processes, imports and CUDA
     # contexts start once, not every iteration. Its workers are daemonic, so
     # they also go away if the loop dies with an exception or SIGTERM.
@@ -498,11 +514,20 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         # this cheap, and a resume then loses no self-play data). Written to a
         # temp file and renamed, so a preemption mid-write can't corrupt it.
         if (iteration + 1) % config.get('cloud', {}).get('buffer_snapshot_every', 1) == 0:
-            buf_path = os.path.join(output_dir, 'buffer.npz')
-            tmp_path = os.path.join(output_dir, 'buffer.tmp.npz')
-            buffer.save(tmp_path)
-            os.replace(tmp_path, buf_path)
-            print(f"  Snapshot saved to {buf_path}", flush=True)
+            if buffer_format == 'shards':
+                # Only this iteration's new positions (N20); drop shards no resume needs
+                shard_dir = os.path.join(output_dir, 'buffer')
+                path = save_shard(buffer, shard_dir, iteration, since=shard_since)
+                shard_since = buffer.total_added
+                pruned = prune_shards(shard_dir, iteration, buffer.max_size)
+                print(f"  Buffer shard saved to {path}"
+                      f"{f' ({len(pruned)} old shards removed)' if pruned else ''}", flush=True)
+            else:
+                buf_path = os.path.join(output_dir, 'buffer.npz')
+                tmp_path = os.path.join(output_dir, 'buffer.tmp.npz')
+                buffer.save(tmp_path)
+                os.replace(tmp_path, buf_path)
+                print(f"  Snapshot saved to {buf_path}", flush=True)
         
         # 4. Arena gating
         arena_record = None

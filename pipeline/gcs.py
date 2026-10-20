@@ -26,10 +26,34 @@ def _is_gcs(path: str) -> bool:
     return str(path).startswith('gs://')
 
 
-def _gcloud_rsync(src: str, dst: str):
-    cmd = ['gcloud', 'storage', 'rsync', '--recursive',
-           '--exclude', r'.*\.tmp(\.npz)?$|.*\.partial$', src, dst]
-    subprocess.run(cmd, check=True)
+def _gcloud_rsync(src: str, dst: str, delete: bool = False, skip_dirs: tuple = ()):
+    exclude = r'.*\.tmp(\.npz)?$|.*\.partial$' + ''.join(f'|{d}/.*' for d in skip_dirs)
+    cmd = ['gcloud', 'storage', 'rsync', '--recursive', '--exclude', exclude]
+    if delete:
+        cmd.append('--delete-unmatched-destination-objects')
+    subprocess.run(cmd + [src, dst], check=True)
+
+
+# Folders whose deletions are mirrored to the remote: buffer shards that
+# prune_shards() removed must not pile up in the bucket (needtofixagain N20).
+# Everything else (checkpoints, metrics) is only ever added or replaced.
+MIRROR_DELETIONS = ('buffer',)
+
+
+def _has_files(path: str) -> bool:
+    return os.path.isdir(path) and any(
+        not name.endswith(_SKIP_SUFFIXES) for name in os.listdir(path))
+
+
+def _delete_unmatched(src: str, dst: str):
+    """Remove files in dst that src no longer has (one folder, not recursive)."""
+    if not os.path.isdir(dst):
+        return
+    keep = set(os.listdir(src))
+    for name in os.listdir(dst):
+        path = os.path.join(dst, name)
+        if name not in keep and os.path.isfile(path):
+            os.remove(path)
 
 
 def _local_mirror(src: str, dst: str):
@@ -58,10 +82,20 @@ def push(local_dir: str, remote: str):
     """Upload the run directory (new/changed files) to `remote`."""
     if not remote:
         return
+    mirrored = tuple(sub for sub in MIRROR_DELETIONS if _has_files(os.path.join(local_dir, sub)))
     if _is_gcs(remote):
-        _gcloud_rsync(local_dir, remote)
+        # Folders synced with deletions below are skipped here, so they upload once
+        _gcloud_rsync(local_dir, remote, skip_dirs=mirrored)
     else:
         _local_mirror(local_dir, remote)
+    for sub in MIRROR_DELETIONS:
+        src = os.path.join(local_dir, sub)
+        if not _has_files(src):        # never wipe the remote copy from an empty folder
+            continue
+        if _is_gcs(remote):
+            _gcloud_rsync(src, remote.rstrip('/') + '/' + sub, delete=True)
+        else:
+            _delete_unmatched(src, os.path.join(remote, sub))
 
 
 def pull(remote: str, local_dir: str):

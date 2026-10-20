@@ -69,6 +69,7 @@ cloud:
   bucket: gs://chaturangazero
   checkpoint_every: 1
   buffer_snapshot_every: 1        # compact buffer: cheap enough every iteration (needtofix M8)
+  buffer_format: shards           # save only each iteration's new positions (needtofixagain N20)
 
 device: auto        # auto | cpu | cuda | cuda:N  (CLI --device or CHATURANGA_DEVICE override)
 seed: 20260829

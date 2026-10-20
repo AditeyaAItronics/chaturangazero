@@ -865,6 +865,157 @@ def test_n19_terminal_result_is_cached(monkeypatch):
     assert len(calls) == 1, "the win check ran more than once for one state"
 
 
+# --- N20: incremental buffer shards -----------------------------------------
+
+def _add_positions(buf, start, count):
+    for v in range(start, start + count):
+        state = np.zeros((3, 6, 7), np.float32)
+        state[0, 0, v % 7] = 1.0
+        buf.add(state, np.eye(7, dtype=np.float32)[v % 7], float(v))   # value = global index
+
+
+def test_n20_shards_round_trip_and_prune(tmp_path):
+    from net.replay import ReplayBuffer, list_shards, load_shards, prune_shards, save_shard
+    shard_dir = str(tmp_path / 'buffer')
+    buf, since = ReplayBuffer(max_size=10), 0
+    for it in range(5):                                   # 4 new positions per iteration
+        _add_positions(buf, 4 * it, 4)
+        save_shard(buf, shard_dir, it, since)
+        since = buf.total_added
+        prune_shards(shard_dir, it, buf.max_size)
+    # 20 positions added, buffer keeps 10: the 3 newest shards (12 positions) suffice
+    assert [it for it, _ in list_shards(shard_dir)] == [2, 3, 4]
+    restored = ReplayBuffer(max_size=10)
+    assert load_shards(restored, shard_dir, last_iteration=4) == 3
+    assert restored.total_added == 20 and len(restored) == 10
+    assert sorted(restored._values[:10].tolist()) == list(range(10, 20))
+    # The commit marker says iteration 3 is the last completed: shard 4 is ignored
+    partial = ReplayBuffer(max_size=10)
+    load_shards(partial, shard_dir, last_iteration=3)
+    # (shards 2 and 3 hold 8 positions; the one that held 0-7 was pruned)
+    assert partial.total_added == 16 and len(partial) == 8
+    assert sorted(partial._values[:8].tolist()) == list(range(8, 16))
+    # A shard from a cut-short later iteration is deleted when the redo saves
+    open(os.path.join(shard_dir, 'iter_0009.npz'), 'wb').close()
+    assert any(p.endswith('iter_0009.npz') for p in prune_shards(shard_dir, 4, 10))
+
+
+def test_n20_shard_holds_only_new_positions(tmp_path):
+    from net.replay import ReplayBuffer, save_shard
+    buf = ReplayBuffer(max_size=10_000)
+    _add_positions(buf, 0, 5000)
+    full = save_shard(buf, str(tmp_path), 0, since=0)
+    _add_positions(buf, 5000, 500)
+    small = save_shard(buf, str(tmp_path), 1, since=5000)
+    with np.load(small) as data:
+        assert int(data['size']) == 500 and int(data['total_added']) == 5500
+    with np.load(full) as data:
+        assert int(data['size']) == 5000
+    # Real file sizes on real games are measured in the improvements report;
+    # these synthetic positions compress to almost nothing
+
+
+def test_n20_kill_during_arena_with_shards(tmp_path, monkeypatch):
+    import json
+    import pipeline.loop as loop
+    from net.replay import ReplayBuffer, load_shards
+    from pipeline.resume import read_run_state
+    out = str(tmp_path / 'run')
+    config = _tiny_connect4_config(iterations=3, arena_every=2)
+    config['cloud'] = {'buffer_format': 'shards'}
+    real_arena = loop.run_batched_arena
+
+    def killed(*a, **k):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(loop, 'run_batched_arena', killed)
+    with pytest.raises(KeyboardInterrupt):
+        loop.training_loop(config, output_dir=out)
+    assert os.path.exists(os.path.join(out, 'buffer', 'iter_0001.npz'))   # cut-short shard
+    assert not os.path.exists(os.path.join(out, 'buffer.npz'))
+    monkeypatch.setattr(loop, 'run_batched_arena', real_arena)
+    loop.training_loop(config, output_dir=out, resume_from='auto')
+    with open(os.path.join(out, 'metrics.json')) as f:
+        metrics = json.load(f)
+    assert [m['iteration'] for m in metrics] == [0, 1, 2] and 'arena' in metrics[1]
+    final = ReplayBuffer(max_size=1000)
+    load_shards(final, os.path.join(out, 'buffer'), last_iteration=2)
+    marker = read_run_state(out)
+    assert final.total_added == marker['buffer_total_added'] == len(final), \
+        "the cut-short iteration's shard was loaded and its positions counted twice"
+
+
+def test_n20_switching_a_run_to_shards_keeps_its_buffer(tmp_path):
+    from net.replay import ReplayBuffer, load_shards
+    from pipeline.loop import training_loop
+    from pipeline.resume import read_run_state
+    out = str(tmp_path / 'run')
+    training_loop(_tiny_connect4_config(iterations=1, arena_every=99), output_dir=out)
+    before = read_run_state(out)['buffer_total_added']
+    config = _tiny_connect4_config(iterations=2, arena_every=99)
+    config['cloud'] = {'buffer_format': 'shards'}
+    training_loop(config, output_dir=out, resume_from='auto')
+    restored = ReplayBuffer(max_size=1000)
+    load_shards(restored, os.path.join(out, 'buffer'), last_iteration=1)
+    assert restored.total_added == len(restored) == read_run_state(out)['buffer_total_added'] > before
+
+
+def test_n20_sync_mirrors_shard_deletions_only(tmp_path):
+    from pipeline import gcs
+    run, bucket = tmp_path / 'run', tmp_path / 'bucket'
+    (run / 'buffer').mkdir(parents=True)
+    for name in ('iter_0001.npz', 'iter_0002.npz'):
+        (run / 'buffer' / name).write_bytes(b'x')
+    (run / 'checkpoint_0001.pt').write_bytes(b'x')
+    gcs.push(str(run), str(bucket))
+    (run / 'buffer' / 'iter_0001.npz').unlink()           # pruned locally
+    (run / 'checkpoint_0001.pt').unlink()                 # deleted locally (never mirrored)
+    gcs.push(str(run), str(bucket))
+    assert not (bucket / 'buffer' / 'iter_0001.npz').exists()
+    assert (bucket / 'buffer' / 'iter_0002.npz').exists()
+    assert (bucket / 'checkpoint_0001.pt').exists(), "only buffer/ deletions are mirrored"
+    # An empty local buffer folder (e.g. before the first pull) never wipes the bucket
+    (run / 'buffer' / 'iter_0002.npz').unlink()
+    gcs.push(str(run), str(bucket))
+    assert (bucket / 'buffer' / 'iter_0002.npz').exists()
+
+
+def test_n20_gcs_push_uploads_buffer_once_with_deletions(tmp_path, monkeypatch):
+    from pipeline import gcs
+    run = tmp_path / 'run'
+    (run / 'buffer').mkdir(parents=True)
+    (run / 'buffer' / 'iter_0003.npz').write_bytes(b'x')
+    calls = []
+    monkeypatch.setattr(gcs.subprocess, 'run', lambda cmd, **k: calls.append(cmd))
+    gcs.push(str(run), 'gs://bucket/run')
+    assert len(calls) == 2
+    main, shards = calls
+    assert main[-1] == 'gs://bucket/run' and main[main.index('--exclude') + 1].endswith('|buffer/.*')
+    assert '--delete-unmatched-destination-objects' not in main
+    assert shards[-1] == 'gs://bucket/run/buffer' and '--delete-unmatched-destination-objects' in shards
+
+
+def test_n20_shards_with_sparse_snapshots(tmp_path, monkeypatch):
+    """buffer_snapshot_every=2: a shard covers two iterations, and a marker can
+    name an iteration that wrote no shard. Resume keeps only completed shards."""
+    import pipeline.loop as loop
+    from net.replay import ReplayBuffer, list_shards, load_shards
+    from pipeline.resume import read_run_state
+    out = str(tmp_path / 'run')
+    config = _tiny_connect4_config(iterations=4, arena_every=99)
+    config['cloud'] = {'buffer_format': 'shards', 'buffer_snapshot_every': 2}
+    loop.training_loop(config, output_dir=out)
+    assert [it for it, _ in list_shards(os.path.join(out, 'buffer'))] == [1, 3]
+    restored = ReplayBuffer(max_size=1000)
+    load_shards(restored, os.path.join(out, 'buffer'), last_iteration=3)
+    assert restored.total_added == len(restored) == read_run_state(out)['buffer_total_added']
+    # Marker at iteration 2 (no shard of its own): only shard 1 is loadable
+    partial = ReplayBuffer(max_size=1000)
+    load_shards(partial, os.path.join(out, 'buffer'), last_iteration=2)
+    with np.load(os.path.join(out, 'buffer', 'iter_0001.npz')) as data:
+        assert partial.total_added == int(data['total_added']) == len(partial)
+
+
 # --- N17: every LR milestone of the shipped Chaturanga configs is reachable --
 
 @pytest.mark.parametrize('name', ['cloud.yaml', 'local.yaml'])

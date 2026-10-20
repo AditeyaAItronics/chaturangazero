@@ -45,6 +45,7 @@ train: {{lr: 1.0e-3, l2: 1.0e-4, batch_size: 32, buffer_size: 20000, steps_per_i
          grad_clip: 1.0, amp_inference: false, mirror_augment: true}}
 arena: {{games: 2, win_threshold: 0.55, every_n_iters: 2, opening_plies: 2}}
 loop: {{games_per_iter: 24, iterations: {iterations}, parallel_games: 12, workers: 1}}
+cloud: {{buffer_format: {buffer_format}}}
 """
 
 
@@ -73,6 +74,7 @@ def main():
     parser.add_argument('--signal', choices=['kill', 'term'], default='kill')
     parser.add_argument('--bucket', default=None, help='default: a temporary local folder')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--buffer-format', choices=['single', 'shards'], default='single')
     args = parser.parse_args()
     rng = random.Random(args.seed)
 
@@ -81,7 +83,7 @@ def main():
     work = os.path.join(tmp, 'vm', 'run')
     config_path = os.path.join(tmp, 'soak.yaml')
     with open(config_path, 'w') as f:
-        f.write(CONFIG.format(iterations=args.iterations))
+        f.write(CONFIG.format(iterations=args.iterations, buffer_format=args.buffer_format))
     log_path = os.path.join(tmp, 'train.log')
     print(f"Soak test in {tmp} (bucket: {bucket})")
 
@@ -146,8 +148,13 @@ def main():
         ckpt = torch.load(os.path.join(bucket, name), map_location='cpu', weights_only=False)
         print(f"{name}: loads, iteration {ckpt.get('iteration')}")
     buf = ReplayBuffer(max_size=20000)
-    buf.load(os.path.join(bucket, 'buffer.npz'))
-    print(f"buffer.npz: loads, {len(buf)} positions")
+    if args.buffer_format == 'shards':
+        from net.replay import load_shards
+        n = load_shards(buf, os.path.join(bucket, 'buffer'), last_iteration=args.iterations - 1)
+        print(f"buffer shards: {n} load, {len(buf)} positions")
+    else:
+        buf.load(os.path.join(bucket, 'buffer.npz'))
+        print(f"buffer.npz: loads, {len(buf)} positions")
     with open(log_path) as f:
         resumes = sum('Auto-resume: ' in line and 'starting fresh' not in line for line in f)
     print(f"Kills: {kills}, automatic resumes: {resumes}")

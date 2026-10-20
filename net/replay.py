@@ -16,6 +16,9 @@ Replay buffer and mirror augmentation.
   can mask illegal logits to -inf before the softmax (§3.1).
 """
 
+import os
+import re
+
 import numpy as np
 from typing import Optional
 
@@ -237,14 +240,22 @@ class ReplayBuffer:
         counts, _ = np.histogram(ages, bins=n_bins, range=(0, max(int(ages.max()), 1) + 1))
         return counts.tolist()
 
-    def save(self, path: str):
-        """Save buffer to disk (compact format, in insertion order)."""
+    def save(self, path: str, since: Optional[int] = None):
+        """
+        Save buffer to disk (compact format, in insertion order).
+
+        since: only positions added at or after this add-count (total_added
+            value) — used for incremental buffer shards (needtofixagain N20).
+        """
         n = len(self)
-        if n == 0:
-            np.savez_compressed(path, size=np.array(0))
-            return
         # Oldest -> newest, so a reload restores the same eviction order
         order = (np.arange(n) + (self._next if n == self.max_size else 0)) % self.max_size
+        if since is not None and n:
+            order = order[self._added_at[order] >= since]
+            n = len(order)
+        if n == 0:
+            np.savez_compressed(path, size=np.array(0), total_added=np.array(self._total_added))
+            return
         lengths = np.array([len(self._pi_idx[i]) for i in order], dtype=np.int32)
         np.savez_compressed(
             path,
@@ -276,6 +287,8 @@ class ReplayBuffer:
 
         n = int(data['size'])
         if n == 0:
+            if 'total_added' in data:
+                self._total_added = int(data['total_added'])
             return
         self._shape = tuple(int(x) for x in data['shape'])
         self._action_size = int(data['action_size'])
@@ -336,3 +349,93 @@ class ReplayBuffer:
         self._size -= k
         self._next = self._size % self.max_size
         self._total_added -= k
+
+
+# --- Incremental snapshots (needtofixagain N20) -------------------------------
+#
+# Saving the whole buffer every iteration recompresses and re-uploads ~1M
+# positions to keep ~80k new ones. Instead each snapshot writes only the
+# positions added since the previous one, as  <dir>/iter_NNNN.npz  (named after
+# the iteration that wrote it). Shards are only ever read up to the last
+# COMPLETED iteration (the commit marker), so a shard written by an iteration
+# that was then cut short is ignored on resume and overwritten when it is
+# redone — the same guarantee as N2's drop_newest(), with no truncation.
+
+_SHARD = re.compile(r'iter_(\d+)\.npz$')
+
+
+def list_shards(directory: str) -> list[tuple[int, str]]:
+    """(iteration, path) of every buffer shard, oldest first."""
+    if not os.path.isdir(directory):
+        return []
+    found = []
+    for name in os.listdir(directory):
+        m = _SHARD.fullmatch(name)
+        if m:
+            found.append((int(m.group(1)), os.path.join(directory, name)))
+    return sorted(found)
+
+
+def _shard_size(path: str) -> int:
+    with np.load(path) as data:
+        return int(data['size'])
+
+
+def save_shard(buffer: ReplayBuffer, directory: str, iteration: int, since: int) -> str:
+    """Write the positions added since add-count `since` as iteration's shard (atomically)."""
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f'iter_{iteration:04d}.npz')
+    tmp = os.path.join(directory, f'iter_{iteration:04d}.tmp.npz')
+    buffer.save(tmp, since=since)
+    os.replace(tmp, path)
+    return path
+
+
+def _needed_shards(shards: list, max_size: int) -> list:
+    """The newest shards that together hold at least max_size positions (all if fewer)."""
+    needed, total = [], 0
+    for it, path in reversed(shards):
+        needed.append((it, path))
+        total += _shard_size(path)
+        if total >= max_size:
+            break
+    return needed[::-1]
+
+
+def prune_shards(directory: str, current_iteration: int, max_size: int) -> list[str]:
+    """
+    Delete shards no resume can need: ones newer than current_iteration (left
+    by an iteration that was cut short) and ones whose positions are all
+    older than the newest max_size. Returns the deleted paths.
+    """
+    shards = list_shards(directory)
+    stale = [p for it, p in shards if it > current_iteration]
+    kept = [(it, p) for it, p in shards if it <= current_iteration]
+    needed = {p for _, p in _needed_shards(kept, max_size)}
+    deleted = stale + [p for _, p in kept if p not in needed]
+    for p in deleted:
+        os.remove(p)
+    return deleted
+
+
+def load_shards(buffer: ReplayBuffer, directory: str, last_iteration: int) -> int:
+    """
+    Fill an empty buffer from the shards written up to last_iteration (the
+    last completed one), keeping the newest buffer.max_size positions.
+    Restores total_added to the last loaded shard's value. Returns the number
+    of shards read.
+    """
+    shards = [(it, p) for it, p in list_shards(directory) if it <= last_iteration]
+    needed = _needed_shards(shards, buffer.max_size)
+    for _, path in needed:
+        part = ReplayBuffer(max_size=max(_shard_size(path), 1))
+        part.load(path)
+        buffer.merge(part)
+        end = part.total_added
+    if needed:
+        # merge() numbered positions from 0; restore the real add-count so the
+        # commit marker's buffer_total_added / trained_upto still line up
+        n = len(buffer)
+        buffer._added_at[buffer._ordered_slots()] = np.arange(end - n, end)
+        buffer._total_added = end
+    return len(needed)
