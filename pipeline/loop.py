@@ -5,6 +5,7 @@ Main training loop — orchestrates the AlphaZero self-play → train cycle.
 """
 
 import os
+import math
 import time
 import json
 import random
@@ -68,6 +69,29 @@ def summarize_sequential_games(games: list[dict], elapsed: float) -> dict:
         'raja_capture_miss_rate': missed / chances if chances else 0.0,
         'eval_cache_hit_rate': last.get('eval_cache_hit_rate', 0.0),
     }
+
+
+def training_steps(new_positions: int, buffer_len: int, batch_size: int, steps_cap: int,
+                   replay_ratio: Optional[float] = None, min_buffer: int = 0) -> int:
+    """
+    Gradient steps for one iteration (needtofixagain N5).
+
+    Fixed `steps_cap` steps (the old behaviour, kept when replay_ratio is None)
+    can train each new position many times: 2000 x 512 samples over ~80k new
+    positions is a replay ratio of ~13, and the very first iteration would
+    fit a random network's games ~13 epochs over. With replay_ratio set, the
+    step count follows the data:
+
+        steps = min(steps_cap, ceil(replay_ratio * new_positions / batch_size))
+
+    and no training happens until the buffer holds at least `min_buffer`
+    positions (a warm-up, so early iterations don't overfit a tiny buffer).
+    """
+    if buffer_len < max(int(min_buffer), batch_size):
+        return 0
+    if replay_ratio is None:
+        return int(steps_cap)
+    return int(min(steps_cap, math.ceil(replay_ratio * new_positions / batch_size)))
 
 
 def load_config(config_path: str) -> dict:
@@ -235,7 +259,9 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     # Training config
     n_iterations = config['loop']['iterations']
     games_per_iter = config['loop']['games_per_iter']
-    steps_per_iter = config['train']['steps_per_iter']
+    steps_per_iter = config['train']['steps_per_iter']     # upper bound when replay_ratio is set
+    replay_ratio = config['train'].get('replay_ratio')       # None: always steps_per_iter (old behaviour)
+    min_buffer = config['train'].get('min_buffer', 0)
     batch_size = config['train']['batch_size']
     n_sims = config['mcts']['sims']
     c_puct = config['mcts']['c_puct']
@@ -260,7 +286,11 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     print(f"\n{'='*60}")
     print(f"Starting training: {n_iterations} iterations")
     print(f"  Games/iter: {games_per_iter}, Sims/move: {n_sims}")
-    print(f"  Steps/iter: {steps_per_iter}, Batch: {batch_size}")
+    if replay_ratio is None:
+        print(f"  Steps/iter: {steps_per_iter}, Batch: {batch_size}")
+    else:
+        print(f"  Steps/iter: replay ratio {replay_ratio} (at most {steps_per_iter}), "
+              f"Batch: {batch_size}, training starts at {min_buffer:,} positions")
     print(f"  Buffer: {config['train']['buffer_size']:,}")
     print(f"{'='*60}\n")
     
@@ -278,6 +308,13 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         trainer.save_checkpoint(best_net_path, iteration=0)
     best_net.eval()
     
+    # Positions already paid for by training (N5), restored from the commit
+    # marker on resume so warm-up games played before a restart still count
+    trained_upto = buffer.total_added
+    run_state = read_run_state(output_dir) if start_iteration > 0 else None
+    if run_state is not None and run_state.get('last_completed_iteration') == start_iteration - 1:
+        trained_upto = min(buffer.total_added, int(run_state.get('trained_upto', trained_upto)))
+    trained_since_gate = False
     for iteration in range(start_iteration, n_iterations):
         iter_start = time.time()
         print(f"\n{'='*40}\n>>> Iteration {iteration+1}/{n_iterations} <<<\n{'='*40}", flush=True)
@@ -377,21 +414,47 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         print(f"  Buffer: {len(buffer):,} positions | Avg game length: {avg_plies:.1f} plies | Cap rate: {cap_rate:.1%}", flush=True)
         print(f"  Terminal reasons: {terminal_stats}", flush=True)
 
-        # 2. Training
-        print(f"Training: {steps_per_iter} steps (batch_size={batch_size})...", flush=True)
-        train_stats = trainer.train_epoch(
-            buffer=buffer,
-            steps=steps_per_iter,
-            batch_size=batch_size,
-        )
+        # 2. Training — step count from the replay ratio (N5). "New" means not
+        # yet trained on, so games from warm-up iterations count once training starts.
+        new_positions = buffer.total_added - trained_upto
+        steps = training_steps(new_positions, len(buffer), batch_size, steps_per_iter,
+                               replay_ratio, min_buffer)
+        train_stats = {}
+        if steps > 0:
+            print(f"Training: {steps} steps (batch_size={batch_size}, "
+                  f"{steps * batch_size / max(new_positions, 1):.1f} samples per new position)...",
+                  flush=True)
+            train_stats = trainer.train_epoch(
+                buffer=buffer,
+                steps=steps,
+                batch_size=batch_size,
+            )
+            trained_since_gate = True
+            if replay_ratio is None:
+                trained_upto = buffer.total_added
+            else:
+                # Advance only by what these steps paid for: if steps_per_iter
+                # capped them, the rest carries over to the next iteration
+                paid = int(steps * batch_size / replay_ratio)
+                trained_upto = min(buffer.total_added, trained_upto + paid)
+        else:
+            print(f"Training skipped: buffer {len(buffer):,} < warm-up {max(min_buffer, batch_size):,} positions",
+                  flush=True)
+        training_diagnostics = {
+            'new_positions': new_positions,
+            'train_steps': steps,
+            'samples_per_new_position': steps * batch_size / new_positions if new_positions else 0.0,
+        }
         
         if train_stats:
             print(f"  Loss summary: Policy={train_stats['mean_policy_loss']:.4f} | Value={train_stats['mean_value_loss']:.4f} | Entropy={train_stats['mean_entropy']:.4f} | LR={trainer.optimizer.param_groups[0]['lr']:.2e}", flush=True)
             print(f"  Value head: calibration error={train_stats['value_calibration_error']:.3f} | "
                   f"sign accuracy={train_stats['value_sign_accuracy']:.1%} | mean |v|={train_stats['value_mean_abs']:.3f}", flush=True)
         
-        # Step LR scheduler
-        trainer.step_scheduler()
+        # Step the LR scheduler only when training happened, so lr_milestones
+        # count training iterations (warm-up iterations don't advance them)
+        if train_stats:
+            trainer.step_scheduler()
         
         # 3. Save checkpoint
         ckpt_path = os.path.join(output_dir, f'checkpoint_{iteration:04d}.pt')
@@ -415,7 +478,11 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         
         # 4. Arena gating
         arena_record = None
-        if (iteration + 1) % arena_every == 0 and best_net_path:
+        gate_due = (iteration + 1) % arena_every == 0 and best_net_path
+        if gate_due and not trained_since_gate:
+            print("Arena skipped: the challenger hasn't trained since the last gate", flush=True)
+        elif gate_due:
+            trained_since_gate = False
             print(f"Arena Gating: {arena_games} games vs best incumbent...", flush=True)
             
             # All arena games run concurrently with batched evaluation (S6);
@@ -461,6 +528,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             'buffer_age_histogram': buffer.age_histogram(),
             'elapsed_seconds': iter_elapsed,
             **selfplay_diagnostics,
+            **training_diagnostics,
         }
         if train_stats:
             metrics.update(train_stats)
@@ -477,6 +545,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         write_run_state(output_dir, {
             'last_completed_iteration': iteration,
             'buffer_total_added': buffer.total_added,
+            'trained_upto': trained_upto,
             'checkpoint': os.path.basename(ckpt_path),
         })
         if sync_to:

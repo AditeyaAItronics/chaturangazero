@@ -287,3 +287,99 @@ def test_n2_drop_newest_and_total_added_survive_save_load(tmp_path, n_added):
     # Adding after a drop continues the ring correctly
     loaded.add(np.zeros((3, 6, 7), np.float32), np.eye(7, dtype=np.float32)[0], 99.0)
     assert len(loaded) == min(len(expected) + 1, 10) and 99.0 in loaded._values
+
+
+# --- N5: gradient steps follow the data (replay ratio + warm-up) ------------
+
+def test_n5_training_steps_formula():
+    from pipeline.loop import training_steps
+    # The plan's cloud numbers: ~80k new positions, batch 512, ratio 3 -> 469 steps, not 2000
+    assert training_steps(80_000, 1_000_000, 512, 2000, replay_ratio=3.0) == 469
+    assert training_steps(10**7, 10**7, 512, 2000, replay_ratio=3.0) == 2000      # cap binds
+    assert training_steps(80_000, 1_000_000, 512, 2000) == 2000                   # old behaviour
+    assert training_steps(80_000, 40_000, 512, 2000, replay_ratio=3.0, min_buffer=50_000) == 0
+    assert training_steps(100, 100, 512, 2000, replay_ratio=3.0) == 0             # < one batch
+
+
+def test_n5_loop_uses_replay_ratio_and_warmup(tmp_path):
+    import json
+    import math
+    from pipeline.loop import training_loop
+    config = _tiny_connect4_config(iterations=6, arena_every=99)
+    config['train'].update({'replay_ratio': 2.0, 'min_buffer': 170, 'steps_per_iter': 1000})
+    out = str(tmp_path / 'run')
+    training_loop(config, output_dir=out)
+    with open(os.path.join(out, 'metrics.json')) as f:
+        metrics = json.load(f)
+    batch = config['train']['batch_size']
+    trained_any = False
+    for m in metrics:
+        if m['buffer_size'] < max(170, batch):   # 170 > one iteration's max (4 x 42)
+            assert m['train_steps'] == 0, m
+        else:
+            trained_any = True
+            assert m['train_steps'] == math.ceil(2.0 * m['new_positions'] / batch), m
+            assert 2.0 <= m['samples_per_new_position'] < 2.0 + batch / m['new_positions']
+    assert trained_any, "the run never got past the warm-up"
+    # Every position played is paid for exactly once, warm-up games included:
+    # the new_positions of the training iterations add up to the buffer at the
+    # last training iteration (the tiny run never fills the 1000-slot buffer)
+    trained = [m for m in metrics if m['train_steps'] > 0]
+    assert sum(m['new_positions'] for m in trained) == trained[-1]['buffer_size']
+    assert metrics[0]['train_steps'] == 0 and metrics[0]['buffer_size'] < 170, \
+        "scenario: the first iteration must be inside the warm-up" 
+
+
+def test_n5_warmup_skips_gate_and_lr_schedule(tmp_path):
+    import json
+    import torch
+    from pipeline.loop import training_loop
+    config = _tiny_connect4_config(iterations=6, arena_every=1)
+    config['train'].update({'replay_ratio': 2.0, 'min_buffer': 170, 'lr_milestones': [100]})
+    out = str(tmp_path / 'run')
+    training_loop(config, output_dir=out)
+    with open(os.path.join(out, 'metrics.json')) as f:
+        metrics = json.load(f)
+    trained = 0
+    for m in metrics:
+        trained += m['train_steps'] > 0
+        # a gate runs exactly when the challenger has trained since the previous gate
+        assert ('arena' in m) == (m['train_steps'] > 0), m['iteration']
+    assert metrics[0]['train_steps'] == 0 and 0 < trained < len(metrics)
+    ckpt = torch.load(os.path.join(out, 'checkpoint_0005.pt'), map_location='cpu', weights_only=False)
+    assert ckpt['scheduler_state_dict']['last_epoch'] == trained, \
+        "lr_milestones must count training iterations, not warm-up ones"
+
+
+def test_n5_capped_steps_carry_the_remainder_over(tmp_path):
+    import json
+    from pipeline.loop import training_loop
+    config = _tiny_connect4_config(iterations=4, arena_every=99)
+    # ratio 2, batch 16, at most 1 step: each iteration pays for only 8 positions
+    config['train'].update({'replay_ratio': 2.0, 'steps_per_iter': 1})
+    out = str(tmp_path / 'run')
+    training_loop(config, output_dir=out)
+    with open(os.path.join(out, 'metrics.json')) as f:
+        metrics = json.load(f)
+    for i, m in enumerate(metrics):
+        assert m['train_steps'] == 1
+        assert m['new_positions'] == m['buffer_size'] - 8 * i, \
+            "positions the capped steps didn't pay for must carry over"
+
+
+def test_n5_resume_keeps_untrained_warmup_positions(tmp_path, monkeypatch):
+    import pipeline.loop as loop
+    from pipeline.resume import read_run_state
+    config = _tiny_connect4_config(iterations=1, arena_every=99)
+    config['train'].update({'replay_ratio': 2.0, 'min_buffer': 10**6})   # never trains
+    out = str(tmp_path / 'run')
+    loop.training_loop(config, output_dir=out)
+    marker = read_run_state(out)
+    assert marker['trained_upto'] == 0 < marker['buffer_total_added']
+    seen = []
+    real = loop.training_steps
+    monkeypatch.setattr(loop, 'training_steps', lambda new, *a, **k: seen.append(new) or real(new, *a, **k))
+    config['loop']['iterations'] = 2
+    loop.training_loop(config, output_dir=out, resume_from='auto')
+    assert seen[0] > marker['buffer_total_added'], \
+        "after resume, iteration 0's warm-up positions must still count as untrained"
