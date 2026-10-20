@@ -49,7 +49,8 @@ train:
   mirror_augment: true
 
 arena:
-  games: 60
+  games: 200               # SE of the score ~3.5 points at 200 games (~6.4 at 60); needtofixagain N12
+  sims: 100                # same search budget as self-play (it was a hidden sims // 2, N11)
   win_threshold: 0.55
   every_n_iters: 5
   opening_plies: 4        # random shared opening per game pair, so argmax players don't replay 2 games

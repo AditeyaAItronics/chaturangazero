@@ -152,6 +152,28 @@ def random_opening(create_state: Callable, n_plies: int, max_tries: int = 100):
     return create_state()
 
 
+def score_interval(results: list, z: float = 1.96) -> tuple[float, float]:
+    """
+    Wilson confidence interval (default 95%) for a match score.
+
+    results: per-game outcomes for player 1 (+1 win, 0 draw, -1 loss); the
+    score is the mean of 1 / 0.5 / 0. Treating the score as a proportion
+    over n games is slightly conservative with draws, and unlike a plain
+    normal interval it never collapses to zero width at 0% or 100%. The
+    standard error near 50% is ~6.4 points at 60 games and ~3.5 at 200
+    (needtofixagain N12): a 55% gate at 60 games is less than one standard
+    error above 50%.
+    """
+    n = len(results)
+    if n == 0:
+        return 0.0, 1.0
+    p = float(np.mean((np.asarray(results, dtype=np.float64) + 1.0) / 2.0))
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
 def gate_model(
     challenger: Callable,
     incumbent: Callable,

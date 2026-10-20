@@ -565,3 +565,47 @@ def test_n7_training_loop_starts_the_pool_once(tmp_path, monkeypatch):
     config['loop'].update({'workers': 2, 'parallel_games': 2})
     training_loop(config, output_dir=str(tmp_path / 'run'))
     assert created == [2], f"expected one pool for the run, got {created}"
+
+
+# --- N11 / N12: arena search budget and gate statistics ---------------------
+
+def test_n12_score_interval():
+    from search.arena import score_interval
+    # 50% over 60 games: half-width ~1.96 x 6.45 points
+    lo, hi = score_interval([1] * 30 + [-1] * 30)
+    assert abs((hi - lo) / 2 / 1.96 - 0.5 / np.sqrt(60)) < 0.003
+    # The plan's old gate: 55% over 60 games is well inside the interval around 50%
+    assert lo < 0.5 < hi and hi > 0.6
+    # 200 games: SE ~3.5 points
+    lo, hi = score_interval([1] * 100 + [-1] * 100)
+    assert abs((hi - lo) / 2 / 1.96 - 0.5 / np.sqrt(200)) < 0.001
+    # Never collapses at the extremes; always inside [0, 1]
+    lo, hi = score_interval([1] * 5)
+    assert hi > 1 - 1e-9 and lo < 0.6
+    lo, hi = score_interval([-1] * 5)
+    assert lo < 1e-9 and hi > 0.4
+
+
+@pytest.mark.parametrize('arena_sims', [None, 3])
+def test_n11_arena_uses_the_configured_search_budget(tmp_path, monkeypatch, arena_sims):
+    import json
+    import pipeline.loop as loop
+    seen = []
+    real = loop.run_batched_arena
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs['n_sims'])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(loop, 'run_batched_arena', spy)
+    config = _tiny_connect4_config(iterations=1, arena_every=1)
+    if arena_sims is not None:
+        config['arena']['sims'] = arena_sims
+    out = str(tmp_path / 'run')
+    loop.training_loop(config, output_dir=out)
+    expected = config['mcts']['sims'] if arena_sims is None else arena_sims
+    assert seen == [expected], "the arena must not silently halve the search budget"
+    with open(os.path.join(out, 'metrics.json')) as f:
+        arena = json.load(f)[0]['arena']
+    assert arena['sims'] == expected and len(arena['score_ci95']) == 2
+    assert arena['score_ci95'][0] <= arena['score'] <= arena['score_ci95'][1]

@@ -22,7 +22,7 @@ from pathlib import Path
 from net.model import DualHeadNet, create_chaturanga_net, create_connect4_net
 from net.replay import ReplayBuffer
 from net.train import Trainer, create_evaluator
-from search.arena import gate_model
+from search.arena import gate_model, score_interval
 from search.baselines import random_player
 from search.mcts import search, select_action_with_temperature
 from pipeline.selfplay import run_self_play_batch
@@ -272,6 +272,8 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     arena_games = config['arena']['games']
     arena_every = config['arena']['every_n_iters']
     win_threshold = config['arena']['win_threshold']
+    # Gate at the self-play search budget unless set (it used to be a hidden sims // 2, N11)
+    arena_sims = int(config['arena'].get('sims', n_sims))
     
     opening_plies = config['arena'].get('opening_plies', 4)
     
@@ -501,17 +503,20 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             arena_start = time.time()
             arena_stats = run_batched_arena(
                 net_a=net, net_b=best_net, create_state=create_state,
-                n_games=arena_games, n_sims=max(1, n_sims // 2),
+                n_games=arena_games, n_sims=arena_sims,
                 action_size=action_size, c_puct=c_puct, device=device,
                 amp=use_amp(device, config['train'].get('amp_inference', True)),
                 opening_plies=opening_plies,
                 eval_cache_size=config['mcts'].get('eval_cache_size', 50_000),
             )
             promoted = arena_stats['p1_win_rate'] >= win_threshold
+            ci_low, ci_high = score_interval(arena_stats['results'])
             print(f"  Arena took {time.time() - arena_start:.1f}s", flush=True)
             
             status_str = "PROMOTED (New best!)" if promoted else "REJECTED (Incumbent retained)"
-            print(f"  Arena result: Challenger {arena_stats['p1_wins']}W-{arena_stats['draws']}D-{arena_stats['p2_wins']}L (Score: {arena_stats['p1_win_rate']:.1%}) -> {status_str}", flush=True)
+            print(f"  Arena result: Challenger {arena_stats['p1_wins']}W-{arena_stats['draws']}D-{arena_stats['p2_wins']}L "
+                  f"(Score: {arena_stats['p1_win_rate']:.1%}, 95% CI {ci_low:.1%}-{ci_high:.1%}, "
+                  f"{arena_sims} sims) -> {status_str}", flush=True)
             
             if promoted:
                 best_net.load_state_dict(net.state_dict())
@@ -525,6 +530,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
                 'games': arena_games,
                 'wins': arena_stats['p1_wins'], 'draws': arena_stats['draws'],
                 'losses': arena_stats['p2_wins'], 'score': arena_stats['p1_win_rate'],
+                'score_ci95': [ci_low, ci_high], 'sims': arena_sims,
                 'promoted': bool(promoted),
             }
         
