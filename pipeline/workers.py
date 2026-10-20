@@ -73,7 +73,9 @@ def _worker(task: dict):
 _SUMMED = ('games', 'p1_wins', 'p2_wins', 'draws', 'samples_generated',
            'raja_capture_chances', 'raja_captures_missed', 'virtual_loss_collisions',
            'eval_cache_hits', 'eval_cache_misses',
-           'simulations', 'moves', 'simulations_dropped')
+           'simulations', 'moves', 'simulations_dropped',
+           'raja_capture_chances_greedy', 'raja_captures_missed_greedy',
+           'raja_captures_missed_by_search')
 
 
 def merge_stats(parts: list[dict], wall_seconds: float) -> dict:
@@ -91,6 +93,9 @@ def merge_stats(parts: list[dict], wall_seconds: float) -> dict:
     out['draw_rate'] = out['draws'] / max(out['games'], 1)
     out['raja_capture_miss_rate'] = (out['raja_captures_missed'] / out['raja_capture_chances']
                                      if out['raja_capture_chances'] else 0.0)
+    out['raja_capture_miss_rate_greedy'] = (
+        out['raja_captures_missed_greedy'] / out['raja_capture_chances_greedy']
+        if out['raja_capture_chances_greedy'] else 0.0)
     lookups = out['eval_cache_hits'] + out['eval_cache_misses']
     out['eval_cache_hit_rate'] = out['eval_cache_hits'] / lookups if lookups else 0.0
     out['workers'] = len(parts)

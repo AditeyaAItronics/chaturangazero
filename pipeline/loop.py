@@ -50,8 +50,9 @@ def summarize_sequential_games(games: list[dict], elapsed: float) -> dict:
         reasons[g['terminal_reason']] = reasons.get(g['terminal_reason'], 0) + 1
     n = max(len(games), 1)
     draws = sum(1 for g in games if g['result'] == 0)
-    chances = sum(g.get('raja_capture_chances', 0) for g in games)
-    missed = sum(g.get('raja_captures_missed', 0) for g in games)
+    from pipeline.inference_server import RAJA_CAPTURE_COUNTERS
+    raja = {k: sum(g.get(k, 0) for g in games) for k in RAJA_CAPTURE_COUNTERS}
+    chances, missed = raja['raja_capture_chances'], raja['raja_captures_missed']
     last = games[-1] if games else {}
     return {
         'games': len(games),
@@ -64,9 +65,11 @@ def summarize_sequential_games(games: list[dict], elapsed: float) -> dict:
         'terminal_reasons': reasons,
         'elapsed_seconds': elapsed,
         'games_per_second': len(games) / max(elapsed, 1e-5),
-        'raja_capture_chances': chances,
-        'raja_captures_missed': missed,
+        **raja,
         'raja_capture_miss_rate': missed / chances if chances else 0.0,
+        'raja_capture_miss_rate_greedy': (raja['raja_captures_missed_greedy']
+                                          / raja['raja_capture_chances_greedy']
+                                          if raja['raja_capture_chances_greedy'] else 0.0),
         'eval_cache_hit_rate': last.get('eval_cache_hit_rate', 0.0),
     }
 
@@ -416,6 +419,11 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             'raja_capture_chances': sp_stats.get('raja_capture_chances', 0),
             'raja_captures_missed': sp_stats.get('raja_captures_missed', 0),
             'raja_capture_miss_rate': sp_stats.get('raja_capture_miss_rate', 0.0),
+            # Greedy (temperature-0) moves only, and whether search itself missed it (N10)
+            'raja_capture_chances_greedy': sp_stats.get('raja_capture_chances_greedy', 0),
+            'raja_captures_missed_greedy': sp_stats.get('raja_captures_missed_greedy', 0),
+            'raja_capture_miss_rate_greedy': sp_stats.get('raja_capture_miss_rate_greedy', 0.0),
+            'raja_captures_missed_by_search': sp_stats.get('raja_captures_missed_by_search', 0),
             'eval_cache_hit_rate': sp_stats.get('eval_cache_hit_rate', 0.0),
             # Batched-server search accounting (Phase 4 tuning of leaves_per_step / virtual_loss)
             'virtual_loss_collisions': sp_stats.get('virtual_loss_collisions', 0),

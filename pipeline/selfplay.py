@@ -43,8 +43,8 @@ def self_play_game(
     states_encoded = []
     policies = []
     legal_canonical = []
-    raja_capture_chances = 0
-    raja_captures_missed = 0
+    from pipeline.inference_server import RAJA_CAPTURE_COUNTERS
+    raja_stats = dict.fromkeys(RAJA_CAPTURE_COUNTERS, 0)
     root_node = None
     
     while True:
@@ -94,11 +94,10 @@ def self_play_game(
         )
 
         # Diagnostic (§2.1): a free Raja capture was available but not played
-        from pipeline.inference_server import _raja_capture_actions
+        from pipeline.inference_server import _raja_capture_actions, _count_raja_capture
         raja_captures = _raja_capture_actions(state, legal_actions)
         if raja_captures:
-            raja_capture_chances += 1
-            raja_captures_missed += action not in raja_captures
+            _count_raja_capture(raja_stats, raja_captures, action, visit_counts, temperature)
         
         # Store training data — π in the same canonical frame as the encoding
         states_encoded.append(encoded)
@@ -119,8 +118,7 @@ def self_play_game(
         'states': states_encoded,
         'policies': policies,
         'legal': legal_canonical,
-        'raja_capture_chances': raja_capture_chances,
-        'raja_captures_missed': int(raja_captures_missed),
+        **{k: int(v) for k, v in raja_stats.items()},
         'result': result,
         'ply_count': state.ply_count,
         'terminal_reason': terminal_reason,

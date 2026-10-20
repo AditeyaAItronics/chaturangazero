@@ -194,7 +194,11 @@ def cmd_plots(args, device):
     single('game_length.png', 'Mean game length', [('avg_plies', 'plies')], 'plies')
     single('cap_and_draws.png', 'Cap rate and draw rate (watch for the shuffling attractor)',
            [('cap_rate', 'move-cap rate'), ('draw_rate', 'draw rate')], 'fraction of games')
-    single('missed_raja.png', 'Missed free Raja captures', [('raja_capture_miss_rate', 'miss rate')], 'fraction')
+    # The greedy (temperature-0) rate is the learning signal; the all-moves rate
+    # also counts misses that were just temperature sampling (needtofixagain N10)
+    single('missed_raja.png', 'Missed free Raja captures',
+           [('raja_capture_miss_rate_greedy', 'greedy moves'),
+            ('raja_capture_miss_rate', 'all moves (incl. sampled)')], 'fraction')
     single('throughput.png', 'Self-play throughput', [('games_per_hour', 'games/hour')], 'games/hour')
 
     # Terminal reasons over training (stacked shares)

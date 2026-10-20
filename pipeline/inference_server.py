@@ -162,6 +162,12 @@ def run_batched_self_play(
         'samples_generated': 0,
         'raja_capture_chances': 0,   # moves where a Raja capture was legal
         'raja_captures_missed': 0,   # ...and a different move was played
+        # The same, for greedy (temperature 0) moves only: in the first temp_moves
+        # plies the move is sampled, so a "miss" there can be sampling noise (N10)
+        'raja_capture_chances_greedy': 0,
+        'raja_captures_missed_greedy': 0,
+        # Search itself missed it: the most-visited move wasn't a Raja capture
+        'raja_captures_missed_by_search': 0,
         'virtual_loss_collisions': 0,
         'simulations': 0,            # completed simulations (each backs up one leaf)
         'moves': 0,                  # moves chosen by search
@@ -260,9 +266,7 @@ def run_batched_self_play(
             # Diagnostic (§2.1): was a free Raja capture on the board, and missed?
             raja_captures = _raja_capture_actions(slot.state, legal_now)
             if raja_captures:
-                stats['raja_capture_chances'] += 1
-                if action not in raja_captures:
-                    stats['raja_captures_missed'] += 1
+                _count_raja_capture(stats, raja_captures, action, visit_dist, temp)
 
             # Record trajectory step — π and legal moves in the same canonical frame as the encoding
             encoded = slot.state.encode()
@@ -352,6 +356,9 @@ def run_batched_self_play(
     stats['draw_rate'] = stats['draws'] / max(stats['games'], 1)
     stats['raja_capture_miss_rate'] = (stats['raja_captures_missed'] / stats['raja_capture_chances']
                                        if stats['raja_capture_chances'] else 0.0)
+    stats['raja_capture_miss_rate_greedy'] = (
+        stats['raja_captures_missed_greedy'] / stats['raja_capture_chances_greedy']
+        if stats['raja_capture_chances_greedy'] else 0.0)
     if cache is not None:
         stats.update(cache.stats())
 
@@ -415,6 +422,27 @@ def _try_expand_without_network(leaf: Node, cache: Optional[EvalCache],
             cache.put_terminal(leaf.state, z, adjudicate)
         return z
     return None
+
+
+RAJA_CAPTURE_COUNTERS = ('raja_capture_chances', 'raja_captures_missed',
+                         'raja_capture_chances_greedy', 'raja_captures_missed_greedy',
+                         'raja_captures_missed_by_search')
+
+
+def _count_raja_capture(stats: dict, raja_captures: set, action: int,
+                        visits: np.ndarray, temperature: float) -> None:
+    """
+    Update the missed-Raja-capture counters (§2.1 diagnostic, split by N10).
+    Call only when a Raja capture was legal.
+    """
+    missed = action not in raja_captures
+    stats['raja_capture_chances'] += 1
+    stats['raja_captures_missed'] += missed
+    if temperature < 1e-8:
+        stats['raja_capture_chances_greedy'] += 1
+        stats['raja_captures_missed_greedy'] += missed
+    if int(np.argmax(visits)) not in raja_captures:
+        stats['raja_captures_missed_by_search'] += 1
 
 
 def _raja_capture_actions(state, legal: list[int]) -> set:

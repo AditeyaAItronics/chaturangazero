@@ -715,3 +715,40 @@ def test_n9_ply_plane_is_independent_of_the_cap():
     at_200 = State(ply_count=150).encode()[12, 0, 0]
     assert at_300 == at_200 == pytest.approx(0.5), \
         "tightening the cap re-scaled the network input (old code: 0.5 -> 0.75)"
+
+
+# --- N10: missed-Raja-capture counter separates sampling from search --------
+
+def test_n10_counter_split():
+    from pipeline.inference_server import RAJA_CAPTURE_COUNTERS, _count_raja_capture
+    stats = dict.fromkeys(RAJA_CAPTURE_COUNTERS, 0)
+    visits = np.zeros(4096)
+    visits[100] = 10                         # search's favourite: the Raja capture
+    # sampled (temperature 1) move that missed: not search's fault
+    _count_raja_capture(stats, {100}, action=7, visits=visits, temperature=1.0)
+    # greedy move that captured
+    _count_raja_capture(stats, {100}, action=100, visits=visits, temperature=0.0)
+    assert stats == {'raja_capture_chances': 2, 'raja_captures_missed': 1,
+                     'raja_capture_chances_greedy': 1, 'raja_captures_missed_greedy': 0,
+                     'raja_captures_missed_by_search': 0}
+    visits[100], visits[7] = 1, 10           # now search itself prefers another move
+    _count_raja_capture(stats, {100}, action=7, visits=visits, temperature=0.0)
+    assert stats['raja_captures_missed_greedy'] == 1 and stats['raja_captures_missed_by_search'] == 1
+
+
+@pytest.mark.parametrize('temp_threshold, all_greedy', [(0, True), (10**6, False)])
+def test_n10_selfplay_reports_greedy_counts(temp_threshold, all_greedy):
+    import torch
+    from net.model import create_chaturanga_net
+    from pipeline.inference_server import run_batched_self_play
+    torch.manual_seed(0)
+    np.random.seed(1)
+    stats = run_batched_self_play(create_chaturanga_net(1, 8), State, total_games=2,
+                                  num_parallel_games=2, n_sims=2, device='cpu', amp=False,
+                                  temp_threshold=temp_threshold, eval_cache_size=0)
+    assert stats['raja_capture_chances'] > 0, "scenario: random nets leave the Raja hanging"
+    if all_greedy:
+        assert stats['raja_capture_chances_greedy'] == stats['raja_capture_chances']
+        assert stats['raja_capture_miss_rate_greedy'] == stats['raja_capture_miss_rate']
+    else:
+        assert stats['raja_capture_chances_greedy'] == 0
