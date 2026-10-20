@@ -10,9 +10,17 @@ merges into the training buffer.
 
 Processes use the 'spawn' start method, which works the same on Windows,
 Linux and macOS and is required for CUDA in child processes.
+
+Pool reuse (needtofixagain N7): starting a 'spawn' worker means a fresh
+Python, `import torch` and (on GPU) a new CUDA context, several seconds per
+worker. `SelfPlayPool` keeps the processes alive for the whole run; each
+iteration only ships the new weights. On one GPU, enable NVIDIA MPS
+(infra/startup.sh does) so the workers' kernels run concurrently instead of
+time-slicing the device.
 """
 
 import multiprocessing as mp
+import os
 import random
 import time
 from typing import Optional
@@ -58,6 +66,7 @@ def _worker(task: dict):
     buffer = ReplayBuffer(max_size=task['games'] * (max_plies + 1))
     stats = run_batched_self_play(net=net, state_cls=state_cls, total_games=task['games'],
                                   device=device, buffer=buffer, **task['kwargs'])
+    stats['worker_pid'] = os.getpid()
     return stats, buffer
 
 
@@ -85,7 +94,54 @@ def merge_stats(parts: list[dict], wall_seconds: float) -> dict:
     lookups = out['eval_cache_hits'] + out['eval_cache_misses']
     out['eval_cache_hit_rate'] = out['eval_cache_hits'] / lookups if lookups else 0.0
     out['workers'] = len(parts)
+    out['worker_pids'] = sorted({p['worker_pid'] for p in parts if 'worker_pid' in p})
+    out['concurrent_games_per_worker'] = max((p.get('concurrent_games', 0) for p in parts), default=0)
     return out
+
+
+class SelfPlayPool:
+    """
+    A pool of self-play worker processes that lives for the whole training run.
+
+        with SelfPlayPool(workers) as pool:
+            for iteration in ...:
+                run_parallel_self_play(..., pool=pool)
+    """
+
+    # Each worker process is replaced after this many iterations, so any slow
+    # memory growth (allocator fragmentation, CUDA caching) can't build up over
+    # a multi-day run; one restart per 25 iterations is negligible.
+    RECYCLE_AFTER_TASKS = 25
+
+    def __init__(self, workers: int):
+        self.workers = max(1, int(workers))
+        self._pool = None
+
+    def map(self, fn, tasks: list):
+        if self._pool is None:
+            self._pool = mp.get_context('spawn').Pool(
+                processes=self.workers, maxtasksperchild=self.RECYCLE_AFTER_TASKS)
+        return self._pool.map(fn, tasks)
+
+    def close(self):
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
+
+    def terminate(self):
+        if self._pool is not None:
+            self._pool.terminate()
+            self._pool.join()
+            self._pool = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # On an exception (e.g. SIGTERM -> SystemExit) don't wait for workers to finish
+        self.terminate() if exc_type is not None else self.close()
+        return False
 
 
 def run_parallel_self_play(
@@ -97,6 +153,7 @@ def run_parallel_self_play(
     seed: int = 0,
     device=None,
     rules: Optional[dict] = None,
+    pool: Optional[SelfPlayPool] = None,
     **kwargs,
 ) -> dict:
     """
@@ -109,6 +166,8 @@ def run_parallel_self_play(
         seed: base seed; worker k uses seed + k, so runs are reproducible.
         device: device for the workers ('cuda' shares the one GPU between them).
         rules: {'move_cap': ..., 'adjudicate_margin': ...} for Chaturanga workers.
+        pool: a SelfPlayPool to reuse across calls; None starts (and stops) a
+            temporary pool for this call only.
         **kwargs: forwarded to run_batched_self_play (n_sims, c_puct,
             num_parallel_games, leaves_per_step, ...).
 
@@ -121,15 +180,24 @@ def run_parallel_self_play(
         rules = {'move_cap': get_move_cap(), 'adjudicate_margin': get_adjudicate_margin()}
     state_dict = {k: v.detach().cpu() for k, v in net.state_dict().items()}
     shares = _split(total_games, workers)
+    parallel = kwargs.get('num_parallel_games', 64)
+    if min(shares) < parallel:
+        # Each worker starts min(share, parallel) games at once and drains to batch 1,
+        # so parallel_games beyond the share has no effect (N7)
+        print(f"  Note: {min(shares)} games per worker < parallel_games={parallel}: each worker "
+              f"runs at most {min(shares)} concurrent games. Fewer workers or more "
+              f"games_per_iter give bigger batches.", flush=True)
     tasks = [{
         'game': game, 'games': n, 'seed': seed + k, 'device': str(device) if device else None,
         'rules': rules, 'net_config': net.config, 'state_dict': state_dict, 'kwargs': kwargs,
     } for k, n in enumerate(shares)]
 
     start = time.time()
-    ctx = mp.get_context('spawn')
-    with ctx.Pool(processes=len(tasks)) as pool:
+    if pool is not None:
         results = pool.map(_worker, tasks)
+    else:
+        with SelfPlayPool(len(tasks)) as temporary:
+            results = temporary.map(_worker, tasks)
     wall = time.time() - start
 
     if buffer is not None:

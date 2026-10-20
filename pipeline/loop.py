@@ -315,6 +315,13 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     if run_state is not None and run_state.get('last_completed_iteration') == start_iteration - 1:
         trained_upto = min(buffer.total_added, int(run_state.get('trained_upto', trained_upto)))
     trained_since_gate = False
+    # One worker pool for the whole run (N7): processes, imports and CUDA
+    # contexts start once, not every iteration. Its workers are daemonic, so
+    # they also go away if the loop dies with an exception or SIGTERM.
+    selfplay_pool = None
+    if config['loop'].get('parallel_games', 1) > 1 and config['loop'].get('workers', 1) > 1:
+        from pipeline.workers import SelfPlayPool
+        selfplay_pool = SelfPlayPool(config['loop']['workers'])
     for iteration in range(start_iteration, n_iterations):
         iter_start = time.time()
         print(f"\n{'='*40}\n>>> Iteration {iteration+1}/{n_iterations} <<<\n{'='*40}", flush=True)
@@ -346,7 +353,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             sp_stats = run_parallel_self_play(
                 net=best_net, game=game_type, total_games=games_per_iter, workers=workers,
                 buffer=buffer, seed=seed + 7919 * (iteration + 1), device=device,
-                **batched_kwargs,
+                pool=selfplay_pool, **batched_kwargs,
             )
         elif parallel_games > 1:
             print(f"Batched self-play: {games_per_iter} games, {parallel_games} concurrent, {n_sims} sims/move (AMP={amp})...", flush=True)
@@ -558,6 +565,8 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         print(f"  Iteration completed in {iter_elapsed:.1f}s. Metrics logged to {metrics_path}", flush=True)
     
     print(f"\n{'='*60}")
+    if selfplay_pool is not None:
+        selfplay_pool.close()
     print("Training complete!")
     print(f"{'='*60}")
 

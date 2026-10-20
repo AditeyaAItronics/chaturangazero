@@ -166,6 +166,7 @@ def run_batched_self_play(
         'simulations': 0,            # completed simulations (each backs up one leaf)
         'moves': 0,                  # moves chosen by search
         'simulations_dropped': 0,    # unused budget; always 0 (kept as a tripwire)
+        'concurrent_games': batch_size,   # games in flight at once (the starting batch)
     }
     cache = EvalCache(eval_cache_size) if eval_cache_size > 0 else None
     leaves_per_step = max(1, int(leaves_per_step))

@@ -521,3 +521,47 @@ def test_n6_search_accounting_reaches_metrics(tmp_path):
         m = json.load(f)[0]
     assert m['simulations_per_move'] == config['mcts']['sims']
     assert m['virtual_loss_collisions'] > 0
+
+
+# --- N7: self-play worker processes live for the whole run ------------------
+
+def _connect4_selfplay(pool=None, games=4, workers=2, parallel=4):
+    from net.model import create_connect4_net
+    from pipeline.workers import run_parallel_self_play
+    return run_parallel_self_play(create_connect4_net(1, 8), 'connect4', total_games=games,
+                                  workers=workers, device='cpu', pool=pool, n_sims=4,
+                                  action_size=7, num_parallel_games=parallel, amp=False)
+
+
+def test_n7_pool_reuses_worker_processes():
+    from pipeline.workers import SelfPlayPool
+    with SelfPlayPool(2) as pool:
+        first = _connect4_selfplay(pool)
+        second = _connect4_selfplay(pool)
+    assert first['games'] == second['games'] == 4
+    assert first['worker_pids'] == second['worker_pids'] and len(first['worker_pids']) == 2, \
+        "the second iteration started new worker processes"
+    assert pool._pool is None, "the pool must be shut down on exit"
+
+
+def test_n7_warns_when_parallel_games_cannot_take_effect(capsys):
+    stats = _connect4_selfplay(games=4, workers=2, parallel=8)    # 2 games per worker < 8
+    assert 'games per worker < parallel_games=8' in capsys.readouterr().out
+    assert stats['concurrent_games_per_worker'] == 2
+
+
+def test_n7_training_loop_starts_the_pool_once(tmp_path, monkeypatch):
+    import pipeline.workers as workers
+    created = []
+    real_init = workers.SelfPlayPool.__init__
+
+    def counting_init(self, n):
+        created.append(n)
+        real_init(self, n)
+
+    monkeypatch.setattr(workers.SelfPlayPool, '__init__', counting_init)
+    from pipeline.loop import training_loop
+    config = _tiny_connect4_config(iterations=2, arena_every=99)
+    config['loop'].update({'workers': 2, 'parallel_games': 2})
+    training_loop(config, output_dir=str(tmp_path / 'run'))
+    assert created == [2], f"expected one pool for the run, got {created}"

@@ -92,6 +92,12 @@ for _ in $(seq 1 60); do
 done
 nvidia-smi >> "$LOG" 2>&1 || echo "[$(date -Is)] WARNING: nvidia-smi still failing" >> "$LOG"
 
+# Self-play runs several worker processes on the one GPU (loop.workers). Without
+# MPS their kernels time-slice the device; with it they run concurrently
+# (needtofixagain N7). Harmless for a single process.
+nvidia-cuda-mps-control -d >> "$LOG" 2>&1 \
+  || echo "[$(date -Is)] WARNING: could not start the CUDA MPS daemon" >> "$LOG"
+
 # Train: restores $RUN_DIR from the bucket, resumes, syncs after every iteration.
 # Exit 143 is the loop's clean SIGTERM (preemption) exit, not a failure.
 cat > /etc/systemd/system/cz-train.service <<EOF
