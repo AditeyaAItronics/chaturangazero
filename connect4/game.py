@@ -26,7 +26,7 @@ class Connect4State:
     """
     Connect-4 game state conforming to the same interface contract as Chaturanga.
     """
-    __slots__ = ('board', '_side', '_ply', '_hash', '_last_action')
+    __slots__ = ('board', '_side', '_ply', '_hash', '_last_action', '_terminal')
     
     def __init__(self, board: Optional[np.ndarray] = None,
                  side_to_move: int = PLAYER_1, ply_count: int = 0,
@@ -39,6 +39,7 @@ class Connect4State:
         self._ply = ply_count
         self._hash = None
         self._last_action = last_action
+        self._terminal = None    # cached is_terminal() result (needtofixagain N19)
     
     @property
     def side_to_move(self) -> int:
@@ -76,16 +77,36 @@ class Connect4State:
         Check terminal conditions.
         Returns (done, z) where z is from side-to-move's perspective.
         """
-        # Check if the LAST player (opponent of side to move) won
-        opp = -self._side
-        if self._last_action >= 0 and self._check_win(opp):
-            return (True, -1.0)  # Side to move lost
-        
-        # Draw: board full
-        if self._ply >= ROWS * COLS:
-            return (True, 0.0)
-        
-        return (False, 0.0)
+        # Only the last move can have made four in a row, so only the lines
+        # through it are checked, and the result is cached: MCTS asks on every
+        # expansion (needtofixagain N19). _check_win() is the full-board scan.
+        if self._terminal is None:
+            if self._last_action >= 0 and self._last_move_won():
+                self._terminal = (True, -1.0)   # the last player won: side to move lost
+            elif self._ply >= ROWS * COLS:
+                self._terminal = (True, 0.0)    # draw: board full
+            else:
+                self._terminal = (False, 0.0)
+        return self._terminal
+
+    def _last_move_won(self) -> bool:
+        """Four in a row through the last piece dropped (by the opponent of the side to move)."""
+        col = self._last_action
+        column = self.board[:, col]
+        row = int(np.flatnonzero(column)[-1])       # the last piece is the top one in its column
+        player = int(column[row])
+        board = self.board
+        for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+            count = 1
+            for sign in (1, -1):
+                r, c = row + sign * dr, col + sign * dc
+                while 0 <= r < ROWS and 0 <= c < COLS and board[r, c] == player:
+                    count += 1
+                    r += sign * dr
+                    c += sign * dc
+            if count >= 4:
+                return True
+        return False
     
     def _check_win(self, player: int) -> bool:
         """Check if the given player has 4 in a row."""

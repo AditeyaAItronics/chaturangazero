@@ -832,6 +832,39 @@ def test_n18_config_reaches_self_play_and_arena(tmp_path, monkeypatch):
     assert seen == {'selfplay': 0.3, 'arena': 0.3}
 
 
+# --- N19: Connect-4 terminal check is incremental and cached ---------------
+
+def test_n19_last_move_check_agrees_with_full_scan():
+    from connect4.game import Connect4State, ROWS, COLS
+    rng = np.random.default_rng(0)
+    positions = wins = 0
+    for _ in range(400):
+        s = Connect4State()
+        while True:
+            positions += 1
+            opp = -s.side_to_move
+            full = (True, -1.0) if (s._last_action >= 0 and s._check_win(opp)) else \
+                   (True, 0.0) if s.ply_count >= ROWS * COLS else (False, 0.0)
+            assert s.is_terminal() == full, s.display()
+            if full[0]:
+                wins += full[1] == -1.0
+                break
+            s = s.apply(int(rng.choice(s.legal_moves())))
+    assert positions > 5000 and wins > 300
+
+
+def test_n19_terminal_result_is_cached(monkeypatch):
+    from connect4.game import Connect4State
+    calls = []
+    real = Connect4State._last_move_won
+    monkeypatch.setattr(Connect4State, '_last_move_won',
+                        lambda self: calls.append(1) or real(self))
+    s = Connect4State().apply(3)
+    first = s.is_terminal()
+    assert s.is_terminal() is first and s.is_terminal() is first
+    assert len(calls) == 1, "the win check ran more than once for one state"
+
+
 # --- N17: every LR milestone of the shipped Chaturanga configs is reachable --
 
 @pytest.mark.parametrize('name', ['cloud.yaml', 'local.yaml'])
