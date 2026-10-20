@@ -23,6 +23,7 @@ def self_play_game(
     reuse_subtree: bool = True,
     mirror_perm: Optional[np.ndarray] = None,
     cache=None,
+    fpu_reduction: Optional[float] = None,
 ) -> dict:
     """
     Play one complete game of self-play, collecting training data.
@@ -77,6 +78,7 @@ def self_play_game(
             root_node=root_node,
             cache=cache,
             return_root=True,
+            fpu_reduction=fpu_reduction,
         )
         
         # Select action with temperature
@@ -152,6 +154,7 @@ def run_self_play_batch(
     verbose: bool = True,
     reuse_subtree: bool = True,
     eval_cache_size: int = 50_000,
+    fpu_reduction: Optional[float] = None,
 ) -> list[dict]:
     """
     Run a batch of self-play games sequentially (naive mode).
@@ -187,6 +190,7 @@ def run_self_play_batch(
             dirichlet_eps=dirichlet_eps,
             reuse_subtree=reuse_subtree,
             cache=cache,
+            fpu_reduction=fpu_reduction,
         )
         if cache is not None:
             game.update(cache.stats())   # cumulative for the batch so far

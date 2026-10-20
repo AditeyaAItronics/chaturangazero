@@ -783,6 +783,55 @@ def test_n14_missing_checkpoint_is_labelled_not_disguised(web_client, tmp_path, 
     assert 'played a random move' in r.get_json()['ai_stats']['note']
 
 
+# --- N18: optional first-play urgency --------------------------------------
+
+def _node_with_one_winning_visit():
+    """3 edges, priors .5/.3/.2; only edge 0 visited, and it scored a win (+1)."""
+    node = Node(State())
+    node.expand([0, 1, 2], np.array([0.5, 0.3, 0.2]))
+    node.N[0], node.W[0] = 1.0, 1.0
+    return node
+
+
+def test_n18_default_is_unchanged():
+    from search.mcts import _select_edge
+    node = _node_with_one_winning_visit()
+    # Old rule: unvisited edges are worth 0, so edge 0 (Q = +1) wins easily
+    assert _select_edge(node, 1.5) == _select_edge(node, 1.5, None) == 0
+
+
+def test_n18_fpu_values_unvisited_moves_relative_to_the_position():
+    from search.mcts import _select_edge
+    node = _node_with_one_winning_visit()
+    node.W[0] = -1.0                      # the only tried move LOST: the position looks bad
+    # Q = 0 for unvisited edges makes them look better than the parent: explore them
+    assert _select_edge(node, 0.1) != 0
+    # With FPU they are judged like the parent (-1 minus a reduction), so the
+    # tiny exploration term no longer pulls the search off the known move
+    assert _select_edge(node, 0.1, fpu_reduction=0.25) == 0
+
+
+def test_n18_config_reaches_self_play_and_arena(tmp_path, monkeypatch):
+    import pipeline.loop as loop
+    seen = {}
+    real_sp, real_arena = loop.run_batched_self_play, loop.run_batched_arena
+
+    def sp(*a, **k):
+        seen['selfplay'] = k['fpu_reduction']
+        return real_sp(*a, **k)
+
+    def arena(*a, **k):
+        seen['arena'] = k['fpu_reduction']
+        return real_arena(*a, **k)
+
+    monkeypatch.setattr(loop, 'run_batched_self_play', sp)
+    monkeypatch.setattr(loop, 'run_batched_arena', arena)
+    config = _tiny_connect4_config(iterations=1, arena_every=1)
+    config['mcts']['fpu_reduction'] = 0.3
+    loop.training_loop(config, output_dir=str(tmp_path / 'run'))
+    assert seen == {'selfplay': 0.3, 'arena': 0.3}
+
+
 # --- N17: every LR milestone of the shipped Chaturanga configs is reachable --
 
 @pytest.mark.parametrize('name', ['cloud.yaml', 'local.yaml'])

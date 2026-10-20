@@ -46,7 +46,7 @@ def load(path, device):
     return net, 'chaturanga', State, net.config['action_size']
 
 
-def mcts_player(net, device, n_sims, action_size):
+def mcts_player(net, device, n_sims, action_size, fpu_reduction=None):
     from net.train import create_evaluator
     from search.mcts import search
     evaluate = create_evaluator(net, device=device, action_size=action_size)
@@ -54,7 +54,7 @@ def mcts_player(net, device, n_sims, action_size):
     def player(state):
         return int(np.argmax(search(state, evaluate, n_sims=n_sims,
                                     action_size=action_size, add_noise=False,
-                                    adjudicate=False)))
+                                    adjudicate=False, fpu_reduction=fpu_reduction)))
     return player
 
 
@@ -89,7 +89,8 @@ def cmd_ladder(args, device):
             net_a, _, create_state, action_size = nets[it_a]
             stats = run_batched_arena(net_a, nets[it_b][0], create_state, n_games=args.games,
                                       n_sims=args.sims, action_size=action_size, device=device,
-                                      opening_plies=args.opening_plies)
+                                      opening_plies=args.opening_plies,
+                                      fpu_reduction=args.fpu_reduction)
             for r in stats['results']:
                 results.append({'player1': f'iter_{it_a}', 'player2': f'iter_{it_b}',
                                 'score': (r + 1) / 2})
@@ -110,7 +111,7 @@ def cmd_baselines(args, device):
     from search.arena import arena
     from search.baselines import random_player, greedy_material_player, alpha_beta_player
     net, game, create_state, action_size = load(args.checkpoint, device)
-    agent = mcts_player(net, device, args.sims, action_size)
+    agent = mcts_player(net, device, args.sims, action_size, args.fpu_reduction)
     opponents = {'random': random_player, 'greedy': greedy_material_player}
     if game == 'chaturanga':
         opponents['alpha_beta_3ply'] = lambda s: alpha_beta_player(s, depth=3)
@@ -136,7 +137,8 @@ def cmd_sims(args, device):
         for b in levels[i + 1:]:
             stats = run_batched_arena(net, net, create_state, n_games=args.games, n_sims=a,
                                       n_sims_b=b, action_size=action_size, device=device,
-                                      opening_plies=args.opening_plies)
+                                      opening_plies=args.opening_plies,
+                                      fpu_reduction=args.fpu_reduction)
             for r in stats['results']:
                 results.append({'player1': f'{a}', 'player2': f'{b}', 'score': (r + 1) / 2})
             print(f"  {a} sims vs {b} sims: {stats['p1_wins']}-{stats['draws']}-{stats['p2_wins']}")
@@ -158,7 +160,8 @@ def cmd_match(args, device):
     net_a, _, create_state, action_size = load(args.checkpoint_a, device)
     net_b = load(args.checkpoint_b, device)[0]
     stats = run_batched_arena(net_a, net_b, create_state, n_games=args.games, n_sims=args.sims,
-                              action_size=action_size, device=device, opening_plies=args.opening_plies)
+                              action_size=action_size, device=device, opening_plies=args.opening_plies,
+                                      fpu_reduction=args.fpu_reduction)
     print(f"A {stats['p1_wins']}W-{stats['draws']}D-{stats['p2_wins']}L B (A score {stats['p1_win_rate']:.1%})")
     if args.out:
         _save({'a': args.checkpoint_a, 'b': args.checkpoint_b, **{k: v for k, v in stats.items()}}, args.out)
@@ -249,7 +252,8 @@ def cmd_game(args, device):
     while not state.is_terminal(adjudicate=False)[0]:
         if state.side_to_move == agent_side:
             visits, root = search(state, evaluate, n_sims=args.sims, action_size=action_size,
-                                  add_noise=False, return_root=True, adjudicate=False)
+                                  add_noise=False, return_root=True, adjudicate=False,
+                                  fpu_reduction=args.fpu_reduction)
             action = int(np.argmax(visits))
             _, v = evaluate(state)
             top = np.argsort(visits)[::-1][:3]
@@ -283,6 +287,8 @@ def main(argv=None):
         sp.add_argument('--games', type=int, default=games, help='games per pairing (even)')
         sp.add_argument('--sims', type=int, default=sims)
         sp.add_argument('--opening-plies', type=int, default=4)
+        sp.add_argument('--fpu-reduction', type=float, default=None,
+                        help="the run's mcts.fpu_reduction, if it used one (needtofixagain N18)")
 
     sp = sub.add_parser('ladder'); sp.add_argument('run_dir'); common(sp, games=20)
     sp.add_argument('--neighbors', type=int, default=3); sp.add_argument('--every', type=int, default=1)
@@ -295,6 +301,7 @@ def main(argv=None):
     sp = sub.add_parser('game'); sp.add_argument('checkpoint'); sp.add_argument('--sims', type=int, default=100)
     sp.add_argument('--opponent', choices=['alpha_beta', 'random'], default='alpha_beta')
     sp.add_argument('--agent-second', action='store_true'); sp.add_argument('--seed', type=int, default=0)
+    sp.add_argument('--fpu-reduction', type=float, default=None)
     sp.add_argument('--out')
 
     args = p.parse_args(argv)

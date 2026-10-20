@@ -354,6 +354,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
             leaves_per_step=mcts_cfg.get('leaves_per_step', 1),
             virtual_loss=mcts_cfg.get('virtual_loss', 3),
             eval_cache_size=mcts_cfg.get('eval_cache_size', 50_000),
+            fpu_reduction=mcts_cfg.get('fpu_reduction'),
         )
 
         if parallel_games > 1 and workers > 1:
@@ -394,6 +395,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
                 verbose=True,
                 reuse_subtree=mcts_cfg.get('reuse_subtree', True),
                 eval_cache_size=mcts_cfg.get('eval_cache_size', 50_000),
+                fpu_reduction=mcts_cfg.get('fpu_reduction'),
             )
 
             # Add games to buffer
@@ -521,6 +523,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
                 amp=use_amp(device, config['train'].get('amp_inference', True)),
                 opening_plies=opening_plies,
                 eval_cache_size=config['mcts'].get('eval_cache_size', 50_000),
+                fpu_reduction=config['mcts'].get('fpu_reduction'),
             )
             promoted = arena_stats['p1_win_rate'] >= win_threshold
             ci_low, ci_high = score_interval(arena_stats['results'])

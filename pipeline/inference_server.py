@@ -115,6 +115,7 @@ def run_batched_self_play(
     leaves_per_step: int = 1,
     virtual_loss: float = 3.0,
     eval_cache_size: int = 50_000,
+    fpu_reduction: Optional[float] = None,
 ) -> dict:
     """
     Generate self-play games using parallel-games batched MCTS.
@@ -141,6 +142,7 @@ def run_batched_self_play(
         virtual_loss: visits-worth of temporary loss applied along a pending path.
         eval_cache_size: entries in the shared evaluation cache (transposition
             table); 0 disables it.
+        fpu_reduction: value of unvisited edges (search.mcts._select_edge); None = 0.
         
     Returns:
         dict of run statistics (games, wins, losses, draws, mean_length, elapsed_time).
@@ -207,7 +209,8 @@ def run_batched_self_play(
                 if slot.done or sims_left.get(i, 0) <= 0:
                     continue
                 for _ in range(min(leaves_per_step, sims_left[i])):
-                    leaf, path = _descend(slot.root, c_puct, virtual_loss, action_size)
+                    leaf, path = _descend(slot.root, c_puct, virtual_loss, action_size,
+                                          fpu_reduction)
 
                     if id(leaf) in pending_ids:
                         # Two descents reached the same unevaluated leaf: undo it and
@@ -365,7 +368,8 @@ def run_batched_self_play(
     return stats
 
 
-def _descend(root: Node, c_puct: float, virtual_loss: float, action_size: int):
+def _descend(root: Node, c_puct: float, virtual_loss: float, action_size: int,
+             fpu_reduction: Optional[float] = None):
     """
     PUCT descent from the root to a leaf, applying virtual loss to every edge on
     the way: each traversed edge looks `virtual_loss` visits worse (a loss for
@@ -375,7 +379,7 @@ def _descend(root: Node, c_puct: float, virtual_loss: float, action_size: int):
     node = root
     path = []
     while node.is_expanded and not node.is_terminal:
-        edge = _select_edge(node, c_puct)
+        edge = _select_edge(node, c_puct, fpu_reduction)
         if virtual_loss:
             node.N[edge] += virtual_loss
             node.W[edge] -= virtual_loss
@@ -502,6 +506,7 @@ def run_batched_arena(
     eval_cache_size: int = 50_000,
     verbose: bool = False,
     n_sims_b: Optional[int] = None,
+    fpu_reduction: Optional[float] = None,
 ) -> dict:
     """
     Arena between two networks with every game played concurrently (needtofix S6).
@@ -552,7 +557,7 @@ def run_batched_arena(
             for root, owner in zip(roots, owners):
                 if step >= budgets[owner]:
                     continue
-                leaf, path = _descend(root, c_puct, 0.0, action_size)
+                leaf, path = _descend(root, c_puct, 0.0, action_size, fpu_reduction)
                 # The arena scores a capped game as a draw, so its search must too (N1)
                 value = _try_expand_without_network(leaf, caches[owner], adjudicate=False)
                 if value is not None:

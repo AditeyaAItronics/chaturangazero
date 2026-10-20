@@ -30,6 +30,7 @@ def search(
     cache: Optional[EvalCache] = None,
     return_root: bool = False,
     adjudicate: bool = True,
+    fpu_reduction: Optional[float] = None,
 ):
     """
     Run MCTS from the given state.
@@ -52,6 +53,7 @@ def search(
         adjudicate: score move-cap leaves by material (self-play training,
             §2.2) if True; as draws if False. Arena, evaluation, web and CLI
             games score a capped game as a draw, so their search must too.
+        fpu_reduction: value of unvisited edges (see _select_edge); None = 0.
 
     Returns:
         visit_counts: np.ndarray of shape (action_size,) — raw visit counts,
@@ -77,7 +79,7 @@ def search(
 
         # 1. SELECT — traverse tree using PUCT until we reach an unexpanded node
         while node.is_expanded and not node.is_terminal:
-            edge = _select_edge(node, c_puct)
+            edge = _select_edge(node, c_puct, fpu_reduction)
             action = node.legal_actions[edge]
             child = node.children.get(action)
             if child is not None:
@@ -160,26 +162,37 @@ def _expand(node: Node, evaluate: Callable, action_size: int,
     return value
 
 
-def _select_edge(node: Node, c_puct: float) -> int:
+def _select_edge(node: Node, c_puct: float, fpu_reduction: Optional[float] = None) -> int:
     """
     Select an edge (index into node.legal_actions) using PUCT:
 
     a* = argmax_a [ Q(s,a) + c_puct * P(s,a) * sqrt(sum_N) / (1 + N(s,a)) ]
 
     Ties go to the first legal action, as before.
+
+    fpu_reduction (first-play urgency, needtofixagain N18): None scores an
+    unvisited edge as Q = 0, a draw — the original behaviour. A number scores
+    it as the node's own mean value minus fpu_reduction * sqrt(prior mass
+    already visited) (Leela Chess Zero style), so in a clearly won or lost
+    position unvisited moves are judged relative to the position, not to 0.
     """
     n = node.N
+    total = float(n.sum())
     # max(.., 1): with 0 visits sqrt(0) would zero the prior term, every score
     # would tie at 0 and the first visit would always go to legal_actions[0].
-    sqrt_total = math.sqrt(max(float(n.sum()), 1.0))
-    q = np.divide(node.W, n, out=np.zeros_like(n), where=n > 0)
+    sqrt_total = math.sqrt(max(total, 1.0))
+    visited = n > 0
+    q = np.divide(node.W, n, out=np.zeros_like(n), where=visited)
+    if fpu_reduction is not None and total > 0:
+        fpu = float(node.W.sum()) / total - fpu_reduction * math.sqrt(float(node.P[visited].sum()))
+        q = np.where(visited, q, fpu)
     scores = q + c_puct * node.P * sqrt_total / (1.0 + n)
     return int(np.argmax(scores))
 
 
-def _select_action(node: Node, c_puct: float) -> int:
+def _select_action(node: Node, c_puct: float, fpu_reduction: Optional[float] = None) -> int:
     """PUCT selection returning the action id (see _select_edge)."""
-    return node.legal_actions[_select_edge(node, c_puct)]
+    return node.legal_actions[_select_edge(node, c_puct, fpu_reduction)]
 
 
 def _backup(node: Node, value: float):

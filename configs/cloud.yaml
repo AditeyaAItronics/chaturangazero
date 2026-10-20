@@ -26,6 +26,7 @@ mcts:
   reuse_subtree: true
   leaves_per_step: 1      # leaves per game per network batch; raise (2-8) after benchmarking
   eval_cache_size: 50000  # transposition/evaluation cache entries per worker; 0 = off
+  fpu_reduction: null     # unvisited-move value: null = 0 (draw); e.g. 0.25 = parent Q - 0.25*sqrt(visited prior) (N18; A/B before enabling)
 
 play:
   temp_moves: 20
