@@ -209,7 +209,8 @@ def test_h5_configure_rules_moves_cap_and_margin():
     configure_rules(move_cap=200, adjudicate_margin=2.0)
     assert not _capped_position(199).is_terminal()[0]
     assert _capped_position(200).is_terminal()[0]
-    assert _capped_position(199).encode()[12, 0, 0] == pytest.approx(199 / 200)
+    # Plane 12 is on a fixed scale, independent of the cap (needtofixagain N9)
+    assert _capped_position(199).encode()[12, 0, 0] == pytest.approx(199 / 300)
 
     # margin 2.0: White up exactly 3 points (Ratha + Ashva - Padati... ) still wins
     board = np.zeros(64, dtype=np.int8)

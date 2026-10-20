@@ -70,7 +70,7 @@ Checked after every move, from the perspective of the side to move $S$, **in thi
 | 4 | $S$ has **no legal move** (stalemate) | **win, $z = +1$**: the opposite of most AlphaZero code, guarded by a unit test |
 | 5 | ply $\ge 300$ (move cap) | training: material adjudication (margin 4). Arena/evaluation: draw |
 
-There is no check, so a Raja may step onto a guarded square; it is only lost when the opponent actually captures it. There is no repetition or 50-move rule, so the cap is the **only** guarantee that a game ends, and it is enforced as a hard assertion. The fraction of games reaching the cap is logged every iteration: above ~25% means the agent has found a "shuffling" loop. Plane 12 (ply / cap) is in the input because adjudication depends on it.
+There is no check, so a Raja may step onto a guarded square; it is only lost when the opponent actually captures it. There is no repetition or 50-move rule, so the cap is the **only** guarantee that a game ends, and it is enforced as a hard assertion. The fraction of games reaching the cap is logged every iteration: above ~25% means the agent has found a "shuffling" loop. Plane 12 (ply / 300, a fixed scale so that tightening the cap doesn't re-scale the input) is in the input because adjudication depends on it.
 
 ---
 

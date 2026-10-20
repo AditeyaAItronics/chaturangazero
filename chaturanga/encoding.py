@@ -5,7 +5,7 @@ Board encoding for the neural network.
 
 Planes 0-5:  Our Padati, Ashva, Gaja, Ratha, Mantri, Raja
 Planes 6-11: Their Padati, Ashva, Gaja, Ratha, Mantri, Raja
-Plane 12:    ply_count / move_cap, constant-filled
+Plane 12:    ply_count / PLY_NORMALIZER (fixed 300), constant-filled
 Plane 13:    All ones — board-edge reference
 """
 
@@ -13,10 +13,15 @@ import numpy as np
 from .board import (
     State, WHITE, BLACK,
     PADATI, ASHVA, GAJA, RATHA, MANTRI, RAJA,
-    rank_of, file_of, sq, get_move_cap,
+    rank_of, file_of, sq,
 )
 
 NUM_PLANES = 14
+# Plane 12's scale is FIXED, not the live move cap (needtofixagain N9): the §2.2
+# response "tighten the cap to 200" would otherwise re-scale the input of every
+# existing checkpoint and buffer position (ply 150 would jump from 0.5 to 0.75).
+# 300 is the default cap, so default-cap runs encode exactly as before.
+PLY_NORMALIZER = 300.0
 # Piece codes in plane order, shaped for broadcasting against an (8, 8) grid
 _PIECE_CODES = np.array([PADATI, ASHVA, GAJA, RATHA, MANTRI, RAJA], dtype=np.int8)[:, None, None]
 
@@ -53,8 +58,8 @@ def encode_state(state: State) -> np.ndarray:
     planes[0:6] = signed[None] == _PIECE_CODES
     planes[6:12] = signed[None] == -_PIECE_CODES
         
-    # Plane 12: ply_count / move_cap
-    planes[12, :, :] = state.ply_count / get_move_cap()
+    # Plane 12: ply_count on a fixed scale (see PLY_NORMALIZER)
+    planes[12, :, :] = state.ply_count / PLY_NORMALIZER
     
     # Plane 13: all ones (board-edge reference)
     planes[13, :, :] = 1.0

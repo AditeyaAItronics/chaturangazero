@@ -7,7 +7,7 @@ import pytest
 
 from tests.conftest import N_POSITIONS
 from chaturanga.board import State, WHITE, BLACK, from_fen, get_move_cap
-from chaturanga.encoding import encode_state, CANONICAL_PERM
+from chaturanga.encoding import encode_state, CANONICAL_PERM, PLY_NORMALIZER
 from chaturanga.moves import encode_action, decode_action, legal_mask, generate_moves
 
 
@@ -66,7 +66,7 @@ def test_encoding_planes():
         # our pieces in 0-5, theirs in 6-11
         assert int(x[:6].sum()) == s.piece_count(s.side_to_move)
         assert int(x[6:12].sum()) == s.piece_count(-s.side_to_move)
-        assert np.all(x[12] == pytest.approx(s.ply_count / get_move_cap()))
+        assert np.all(x[12] == pytest.approx(s.ply_count / PLY_NORMALIZER))
         assert np.all(x[13] == 1.0)
 
 

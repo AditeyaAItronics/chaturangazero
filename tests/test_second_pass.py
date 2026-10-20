@@ -704,3 +704,14 @@ def test_n8_a_rule_edit_in_yaml_fails_loudly(tmp_path, change):
     with pytest.raises(ValueError, match='does not match the engine'):
         training_loop(config, output_dir=str(tmp_path / 'run'), device='cpu')
     assert not (tmp_path / 'run' / 'config.yaml').exists(), "rejected before writing anything"
+
+
+# --- N9: the ply plane doesn't change meaning when the cap is tightened -----
+
+def test_n9_ply_plane_is_independent_of_the_cap():
+    state = State(ply_count=150)
+    at_300 = state.encode()[12, 0, 0]
+    configure_rules(move_cap=200)          # the §2.2 response to the shuffling attractor
+    at_200 = State(ply_count=150).encode()[12, 0, 0]
+    assert at_300 == at_200 == pytest.approx(0.5), \
+        "tightening the cap re-scaled the network input (old code: 0.5 -> 0.75)"
