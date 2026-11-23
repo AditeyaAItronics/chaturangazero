@@ -556,6 +556,7 @@ class ArenaApp {
         item.className = 'candidate-item';
         const icon = m.piece ? `<span class="candidate-icon">${pieceSVG(m.piece)}</span>` : '';
         const total = stats.total_visits || stats.sims;
+        item.title = `${m.visits} of ${total} search simulations went to this move`;
         item.innerHTML = `
           <div class="candidate-item-left">
             <span class="candidate-rank">${idx === 0 ? 'Played' : '#' + (idx + 1)}</span>

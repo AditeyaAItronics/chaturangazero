@@ -1677,3 +1677,40 @@ body {
   gap: 1rem;
   padding-top: 0.9rem;
 }
+
+/* History and the AI's search side by side under the board; stacked on
+   narrow screens. History is narrower: its rows are short. */
+.under-board {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  align-items: stretch;
+}
+
+.under-board .panel-card {
+  min-width: 0;
+}
+
+.under-board .candidate-move-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.under-board .candidate-item-left {
+  min-width: 0;
+}
+
+.under-board .candidate-header {
+  font-size: 0.7rem;
+}
+
+@media (max-width: 640px) {
+  .under-board {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Narrow AI panel: the visit count moves to the row's tooltip */
+.under-board .candidate-visits-badge {
+  display: none;
+}
