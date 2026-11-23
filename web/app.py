@@ -61,6 +61,10 @@ def _checkpoint_path(game: str, model_id: str):
         elif model_id == 'az_latest':
             path = (_latest_chaturanga_checkpoint()[1]
                     or os.path.join(PROJECT_ROOT, 'runs', 'chaturanga', 'best.pt'))
+        elif model_id.startswith('ckpt_') and model_id[5:].isdigit():
+            # A specific checkpoint_NNNN.pt (digits only, so no path tricks)
+            path = os.path.join(PROJECT_ROOT, 'runs', 'chaturanga',
+                                f'checkpoint_{int(model_id[5:]):04d}.pt')
     elif game == 'connect4':
         if model_id in ('az_final', 'az_latest'):
             path = os.path.join(PROJECT_ROOT, 'runs', 'connect4', 'final.pt')
@@ -71,7 +75,8 @@ def _checkpoint_path(game: str, model_id: str):
     return path if path and os.path.exists(path) else None
 
 
-PLAY_SIMS = 200          # MCTS simulations per AI move in this app
+PLAY_SIMS = 200          # default MCTS simulations per AI move in this app
+MIN_SIMS, MAX_SIMS = 10, 800   # range of the strength slider
 _INFO_CACHE = {}
 _UI_PIECE_NAMES = {1: 'Padati', 2: 'Ashva', 3: 'Gaja', 4: 'Ratha', 5: 'Mantri', 6: 'Raja'}
 
@@ -83,6 +88,18 @@ def _iteration_of(path: str, ckpt: dict):
         return int(ckpt['iteration']) + 1
     match = re.search(r'checkpoint_(\d+)\.pt$', os.path.basename(path))
     return int(match.group(1)) + 1 if match else None
+
+
+def _move_name(state, action: int, game: str) -> str:
+    """'Ashva g8 → f6' / 'Raja e2 × e3' for Chaturanga, 'Column 4' for Connect-4."""
+    if game != 'chaturanga':
+        return f"Column {action + 1}"
+    f_s, t_s = decode_action(action)
+    cols = 'abcdefgh'
+    capture = '×' if state.piece_at(t_s) != 0 else '→'
+    return (f"{_UI_PIECE_NAMES.get(abs(int(state.piece_at(f_s))), '')} "
+            f"{cols[file_of(f_s)]}{rank_of(f_s)+1} {capture} "
+            f"{cols[file_of(t_s)]}{rank_of(t_s)+1}")
 
 
 def _checkpoint_info(path: str) -> dict:
@@ -368,6 +385,16 @@ def list_models():
             {'id': 'random', 'name': 'Random Moves', 'type': 'random'},
         ]
     }
+    # Every other checkpoint in the run is an opponent too ("old vs new" games);
+    # the newest is already listed as "latest checkpoint"
+    from pipeline.resume import list_checkpoints
+    ckpts = list_checkpoints(os.path.join(PROJECT_ROOT, 'runs', 'chaturanga'))
+    older = [{'id': f'ckpt_{it:04d}', 'name': 'AlphaZero · iteration', 'type': 'az'}
+             for it, _ in reversed(ckpts[:-1])]
+    chat = models_data['chaturanga']
+    insert_at = next(i for i, m in enumerate(chat) if m['id'] == 'az_latest') + 1
+    chat[insert_at:insert_at] = older
+
     # Say so when an AlphaZero player has no checkpoint: it then plays random
     # moves, which must not pass for the trained agent (N14)
     for game, entries in models_data.items():
@@ -379,7 +406,9 @@ def list_models():
                     entry['name'] += ' (no checkpoint: plays random moves)'
                 elif game == 'chaturanga':
                     iteration = _checkpoint_info(path)['iteration']
-                    if iteration is not None:
+                    if entry['id'].startswith('ckpt_'):
+                        entry['name'] += f' {iteration}'
+                    elif iteration is not None:
                         entry['name'] += f' (iteration {iteration})'
     return jsonify(models_data)
 
@@ -398,6 +427,25 @@ def model_info():
         **_checkpoint_info(path),
         **_run_summary(os.path.dirname(path)),
     })
+
+
+@app.route('/api/positions', methods=['GET'])
+@_with_session_lock
+def game_positions():
+    """Board after every ply of the current Chaturanga game, for step-by-step review."""
+    if current_session.game != 'chaturanga':
+        return jsonify({'positions': []})
+    states = list(current_session.history) + [current_session.state]
+    positions = []
+    for ply, st in enumerate(states):
+        board = [[int(st.piece_at(sq(r, f))) for f in range(8)] for r in range(8)]
+        last = None
+        if ply > 0 and ply - 1 < len(current_session.actions):
+            f_s, t_s = decode_action(current_session.actions[ply - 1])
+            last = {'from_sq': int(f_s), 'to_sq': int(t_s)}
+        positions.append({'ply': ply, 'board': board, 'last_move': last,
+                          'side_to_move': int(st.side_to_move)})
+    return jsonify({'positions': positions})
 
 
 @app.route('/api/state', methods=['GET'])
@@ -482,12 +530,17 @@ def ai_move():
     action_size = 4096 if current_session.game == 'chaturanga' else 7
     chosen_action = None
     ai_stats = {}
+    body = request.get_json(silent=True) or {}
+    try:
+        requested_sims = int(body.get('sims', PLAY_SIMS))
+    except (TypeError, ValueError):
+        requested_sims = PLAY_SIMS
 
-    if player_type in ('az_latest', 'az_best', 'az_final', 'az_phase0'):
+    if player_type in ('az_latest', 'az_best', 'az_final', 'az_phase0') or player_type.startswith('ckpt_'):
         _, evaluate = get_model(current_session.game, player_type)
         if evaluate is not None:
             # Run MCTS search
-            n_sims = PLAY_SIMS
+            n_sims = max(MIN_SIMS, min(MAX_SIMS, requested_sims))
             c_puct = 1.5
             vc, root = search(
                 state=state,
@@ -512,28 +565,29 @@ def ai_move():
             root_val = side_value * state.side_to_move
             total_visits = sum(legal_vc.values())
 
-            # Top 3 candidate moves
-            sorted_candidates = sorted(legal_vc.items(), key=lambda kv: kv[1], reverse=True)[:3]
-            top_moves = []
-            for a, count in sorted_candidates:
-                pct = (count / total_visits * 100) if total_visits > 0 else 0
-                if current_session.game == 'chaturanga':
-                    f_s, t_s = decode_action(a)
-                    cols = 'abcdefgh'
-                    capture = '×' if state.piece_at(t_s) != 0 else '→'
-                    notate = (f"{_UI_PIECE_NAMES.get(abs(int(state.piece_at(f_s))), '')} "
-                              f"{cols[file_of(f_s)]}{rank_of(f_s)+1} {capture} "
-                              f"{cols[file_of(t_s)]}{rank_of(t_s)+1}")
-                else:
-                    notate = f"Column {a+1}"
-                entry = {'action': a, 'name': notate, 'visits': count, 'pct': round(pct, 1)}
+            # The network's own move probabilities at the root (its "instinct",
+            # before any search; no exploration noise in this app)
+            prior = {int(a): float(p) for a, p in zip(root.legal_actions, root.P)}
+            instinct = max(prior, key=prior.get)
+
+            def describe(a):
+                count = legal_vc.get(a, 0)
+                entry = {'action': a, 'name': _move_name(state, a, current_session.game),
+                         'visits': count,
+                         'pct': round(count / total_visits * 100, 1) if total_visits else 0.0,
+                         'prior': round(prior.get(a, 0.0) * 100, 1)}
                 if current_session.game == 'chaturanga':
                     entry['piece'] = int(state.piece_at(decode_action(a)[0]))
-                top_moves.append(entry)
+                return entry
 
+            # Top 3 by search visits, plus the network's favourite if search dropped it
+            ranked = [a for a, _ in sorted(legal_vc.items(), key=lambda kv: kv[1], reverse=True)[:3]]
+            top_moves = [describe(a) for a in ranked]
             ai_stats = {
                 'value': round(root_val, 3),       # White's / Red's view
                 'top_moves': top_moves,
+                'instinct': describe(instinct),
+                'search_agrees': instinct == chosen_action,
                 'sims': n_sims,
                 'total_visits': total_visits,
             }

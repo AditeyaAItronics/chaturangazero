@@ -85,6 +85,7 @@
               <h2 class="game-over-title" id="game-over-title">Game Over</h2>
               <p class="game-over-desc" id="game-over-desc">White won by Raja capture.</p>
               <div class="game-over-actions">
+                <button class="btn btn-secondary" id="btn-modal-review">Review game</button>
                 <button class="btn btn-primary" id="btn-modal-restart">Play Again</button>
               </div>
             </div>
@@ -117,6 +118,13 @@
               <h3 class="panel-title">Move History</h3>
               <span class="ply-counter" id="ply-counter">Ply: 0</span>
             </div>
+            <div class="review-nav" id="review-nav" hidden>
+              <button class="review-btn" id="review-first" title="Start position">⏮</button>
+              <button class="review-btn" id="review-prev" title="Previous move (←)">◀</button>
+              <span class="review-pos" id="review-pos">Review</span>
+              <button class="review-btn" id="review-next" title="Next move (→)">▶</button>
+              <button class="review-btn" id="review-last" title="Final position">⏭</button>
+            </div>
             <div class="history-list" id="history-list"></div>
           </div>
 
@@ -134,8 +142,13 @@
               </div>
             </div>
 
+            <div class="instinct-line" id="instinct-line" hidden></div>
+
             <div class="mcts-candidates" id="mcts-candidates-box">
-              <div class="candidate-header" id="candidate-header">Moves the search spent the most time on</div>
+              <div class="candidate-header" id="candidate-header">
+              <span>Top moves</span>
+              <span class="bar-key"><i class="key-net"></i>network instinct <i class="key-search"></i>after search</span>
+            </div>
               <div class="candidates-list" id="candidates-list">
                 <div class="empty-state">The AI's top candidate moves appear here after it moves.</div>
               </div>
@@ -176,11 +189,8 @@
 
           <!-- Action Buttons -->
           <div class="matchup-actions">
-            <button class="btn btn-accent" id="btn-ai-step">
-              ⚡ Make AI move
-            </button>
-            <button class="btn btn-secondary" id="btn-autoplay">
-              ▶ Auto-Play: OFF
+            <button class="btn btn-secondary" id="btn-autoplay" title="Only matters when two AIs play each other">
+              ⏸ Pause AI vs AI
             </button>
             <button class="btn btn-outline" id="btn-undo">
               ↩ Undo Move
@@ -201,6 +211,23 @@
               <input type="range" id="speed-slider" min="100" max="2500" step="50" value="600" class="speed-range-slider" aria-label="Pause before AI moves">
               <span class="slider-limit">Long (2.5s)</span>
             </div>
+          </div>
+
+          <!-- Search strength: MCTS simulations per AlphaZero move -->
+          <div class="speed-control-box strength-box">
+            <div class="speed-header">
+              <label for="strength-slider" class="speed-label">
+                <span class="speed-icon">🧠</span>
+                <span>AlphaZero search strength</span>
+              </label>
+              <span class="speed-badge" id="strength-display">200 sims</span>
+            </div>
+            <div class="slider-wrapper">
+              <span class="slider-limit">Weak (10)</span>
+              <input type="range" id="strength-slider" min="10" max="800" step="10" value="200" class="speed-range-slider" aria-label="AlphaZero search simulations per move">
+              <span class="slider-limit">Strong (800)</span>
+            </div>
+            <p class="strength-hint">Tree-search simulations per move. More is stronger but slower; training used 40.</p>
           </div>
         </div>
 

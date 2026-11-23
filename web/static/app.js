@@ -23,12 +23,13 @@ class ArenaApp {
     this.selectedSq = null;
     this.legalTargets = new Map(); // to_sq -> action
     this.flipped = false;
-    this.autoPlay = false;
+    this.autoPlay = true;     // AI vs AI plays on unless paused
     this.autoPlayDelay = 600; // ms delay between moves
-    this.playSims = 200;      // replaced by /api/model_info
+    this.reviewIndex = null;  // ply shown while reviewing a finished game
+    this.positions = [];      // every position of the game, from /api/positions
+    this.playSims = 200;      // set by the search-strength slider
     // Set when an AI move request fails: automatic AI moves stop (no endless
-    // retry loop) until the next human action, new game, undo or Auto-Play toggle.
-    // The "Make AI move" button still works.
+    // retry loop) until the next human action, new game, undo, or Pause/Resume.
     this.autoAiPaused = false;
     this.autoPlayTimer = null;
     this.isThinking = false;
@@ -86,7 +87,6 @@ class ArenaApp {
     // Selectors & Controls
     this.selectP1 = document.getElementById('select-p1');
     this.selectP2 = document.getElementById('select-p2');
-    this.btnAiStep = document.getElementById('btn-ai-step');
     this.btnAutoPlay = document.getElementById('btn-autoplay');
     this.btnUndo = document.getElementById('btn-undo');
 
@@ -119,9 +119,30 @@ class ArenaApp {
     this.selectP1.addEventListener('change', () => this.startNewGame());
     this.selectP2.addEventListener('change', () => this.startNewGame());
 
-    this.btnAiStep.addEventListener('click', () => this.stepAi());
     this.btnAutoPlay.addEventListener('click', () => this.toggleAutoPlay());
     this.btnUndo.addEventListener('click', () => this.undoMove());
+
+    this.strengthSlider = document.getElementById('strength-slider');
+    this.strengthSlider.addEventListener('input', (e) => {
+      this.playSims = parseInt(e.target.value, 10);
+      document.getElementById('strength-display').textContent = `${this.playSims} sims`;
+      const cardSims = document.getElementById('model-sims');
+      if (cardSims) cardSims.textContent = this.playSims;
+    });
+
+    // Reviewing a finished game
+    this.reviewNav = document.getElementById('review-nav');
+    document.getElementById('btn-modal-review').addEventListener('click', () => this.startReview());
+    document.getElementById('review-first').addEventListener('click', () => this.reviewGo(0));
+    document.getElementById('review-prev').addEventListener('click', () => this.reviewStep(-1));
+    document.getElementById('review-next').addEventListener('click', () => this.reviewStep(1));
+    document.getElementById('review-last').addEventListener('click', () => this.reviewGo(Infinity));
+    document.addEventListener('keydown', (e) => {
+      const typing = e.target instanceof Element && e.target.closest('input, select, textarea');
+      if (this.reviewIndex === null || typing) return;
+      if (e.key === 'ArrowLeft') { this.reviewStep(-1); e.preventDefault(); }
+      if (e.key === 'ArrowRight') { this.reviewStep(1); e.preventDefault(); }
+    });
 
     if (this.speedSlider) {
       this.speedSlider.addEventListener('input', (e) => {
@@ -187,10 +208,8 @@ class ArenaApp {
       this.autoPlayTimer = null;
     }
     this.currentGame = game;
-    this.autoPlay = false;
-    this.btnAutoPlay.textContent = '▶ Auto-Play: OFF';
-    this.btnAutoPlay.classList.remove('btn-accent');
-    this.btnAutoPlay.classList.add('btn-secondary');
+    this.autoPlay = true;
+    this.btnAutoPlay.textContent = '⏸ Pause AI vs AI';
 
     if (game === 'chaturanga') {
       this.tabChaturanga.classList.add('active');
@@ -234,14 +253,12 @@ class ArenaApp {
       this.autoPlayTimer = null;
     }
     if (this.autoPlay) {
-      this.btnAutoPlay.textContent = '⏸ Auto-Play: ON';
-      this.btnAutoPlay.classList.remove('btn-secondary');
-      this.btnAutoPlay.classList.add('btn-accent');
+      this.btnAutoPlay.textContent = '⏸ Pause AI vs AI';
+      this.btnAutoPlay.classList.remove('btn-accent');
       this.checkAutoPlay();
     } else {
-      this.btnAutoPlay.textContent = '▶ Auto-Play: OFF';
-      this.btnAutoPlay.classList.remove('btn-accent');
-      this.btnAutoPlay.classList.add('btn-secondary');
+      this.btnAutoPlay.textContent = '▶ Resume AI vs AI';
+      this.btnAutoPlay.classList.add('btn-accent');
     }
   }
 
@@ -274,21 +291,6 @@ class ArenaApp {
 
   setThinkingState(isThinking) {
     this.isThinking = isThinking;
-
-    // 1. Action button state
-    if (this.btnAiStep) {
-      this.updateAiButton();
-      if (isThinking) {
-        this.btnAiStep.classList.add('is-thinking');
-        this.btnAiStep.innerHTML = `
-          <span class="thinking-spinner"></span>
-          <span>Thinking (${this.playSims} simulations)…</span>
-        `;
-      } else {
-        this.btnAiStep.classList.remove('is-thinking');
-        this.btnAiStep.innerHTML = `⚡ Make AI move`;
-      }
-    }
 
     // 2. Active Player Bar glow and badge
     const activePlayer = this.gameState ? this.gameState.side_to_move : 1;
@@ -350,6 +352,8 @@ class ArenaApp {
     this.legalTargets.clear();
     this.lastMove = null;
     this.autoAiPaused = false;
+    this.reviewIndex = null;
+    this.positions = [];
     this.gameOverOverlay.style.display = 'none';
 
     try {
@@ -440,7 +444,8 @@ class ArenaApp {
     try {
       const res = await fetch('/api/ai_move', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sims: this.playSims })
       });
       if (res.ok) {
         const data = await res.json();
@@ -483,6 +488,8 @@ class ArenaApp {
       const res = await fetch('/api/undo', { method: 'POST' });
       if (res.ok) {
         this.autoAiPaused = false;
+        this.reviewIndex = null;
+        this.positions = [];
         this.gameState = await res.json();
         this.selectedSq = null;
         this.legalTargets.clear();
@@ -507,7 +514,6 @@ class ArenaApp {
         box.innerHTML = '<div class="empty-state">No trained checkpoint found in runs/chaturanga.</div>';
         return;
       }
-      if (info.play_sims) this.playSims = info.play_sims;
       badge.textContent = info.iteration ? `iteration ${info.iteration}` : 'best model';
       const fmt = n => (n === undefined || n === null) ? null : Number(n).toLocaleString();
       const rows = [
@@ -517,7 +523,7 @@ class ArenaApp {
         ['Gradient steps', fmt(info.train_steps)],
         ['Promotions', info.arena_matches ? `${info.promotions} of ${info.arena_matches} arena matches won` : null],
         ['Compute', info.hours ? `${info.hours} h of self-play training` : null],
-        ['Search here', `${info.play_sims} simulations per move`],
+        ['Search here', `<span id="model-sims">${this.playSims}</span> simulations per move (slider)`],
       ].filter(([, v]) => v);
       box.innerHTML = rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
     } catch (err) {
@@ -535,6 +541,49 @@ class ArenaApp {
     document.getElementById('model-card').style.display = c4 ? 'none' : '';
   }
 
+  // Load every position of the finished game, then show ply `target`
+  async startReview(target = Infinity) {
+    if (this.currentGame !== 'chaturanga') return;
+    try {
+      const res = await fetch('/api/positions');
+      this.positions = (await res.json()).positions || [];
+    } catch (err) {
+      console.error('Could not load the game for review:', err);
+      return;
+    }
+    if (!this.positions.length) return;
+    this.gameOverOverlay.style.display = 'none';
+    this.reviewGo(target);
+  }
+
+  reviewGo(index) {
+    if (!this.positions.length) { this.startReview(index); return; }
+    this.reviewIndex = Math.max(0, Math.min(this.positions.length - 1, index));
+    this.render();
+  }
+
+  async reviewStep(delta) {
+    if (!this.positions.length) await this.startReview(Infinity);
+    if (!this.positions.length) return;
+    const from = this.reviewIndex === null ? this.positions.length - 1 : this.reviewIndex;
+    this.reviewGo(from + delta);
+  }
+
+  updateReviewNav() {
+    const show = this.currentGame === 'chaturanga' && this.gameState?.is_terminal;
+    this.reviewNav.hidden = !show;
+    if (!show) return;
+    const last = Math.max(0, (this.positions.length || (this.gameState.ply_count + 1)) - 1);
+    const at = this.reviewIndex === null ? last : this.reviewIndex;
+    document.getElementById('review-pos').textContent =
+      this.reviewIndex === null ? 'Review' : `${at} / ${last}`;
+    document.getElementById('review-pos').title = 'Ply shown / last ply (← and → keys step)';
+    document.getElementById('review-first').disabled = this.reviewIndex !== null && at === 0;
+    document.getElementById('review-prev').disabled = this.reviewIndex !== null && at === 0;
+    document.getElementById('review-next').disabled = this.reviewIndex === null || at === last;
+    document.getElementById('review-last').disabled = this.reviewIndex === null || at === last;
+  }
+
   updateAiInsights(stats) {
     if (!stats) return;
 
@@ -548,6 +597,19 @@ class ArenaApp {
       this.evalValueText.textContent = `${Math.round(pct)}% – ${100 - Math.round(pct)}%`;
     }
 
+    // The network's instinct (raw policy) against what the search chose
+    const instinctLine = document.getElementById('instinct-line');
+    if (stats.instinct && stats.top_moves && stats.top_moves.length) {
+      const chosen = stats.top_moves[0];
+      instinctLine.hidden = false;
+      instinctLine.className = `instinct-line ${stats.search_agrees ? 'agrees' : 'overruled'}`;
+      instinctLine.innerHTML = stats.search_agrees
+        ? `Search <strong>confirmed</strong> the network's first instinct: ${stats.instinct.name} (${Math.round(stats.instinct.prior)}% → ${Math.round(chosen.pct)}%).`
+        : `Search <strong>overruled</strong> the network: its instinct was ${stats.instinct.name} (${Math.round(stats.instinct.prior)}%), but ${stats.sims} simulations chose ${chosen.name}.`;
+    } else {
+      instinctLine.hidden = true;
+    }
+
     // Candidate branch moves
     if (stats.top_moves && stats.top_moves.length > 0) {
       this.candidatesList.innerHTML = '';
@@ -556,7 +618,8 @@ class ArenaApp {
         item.className = 'candidate-item';
         const icon = m.piece ? `<span class="candidate-icon">${pieceSVG(m.piece)}</span>` : '';
         const total = stats.total_visits || stats.sims;
-        item.title = `${m.visits} of ${total} search simulations went to this move`;
+        item.title = (m.prior !== undefined ? `Network instinct: ${m.prior}% · ` : '')
+          + `after search: ${m.visits} of ${total} simulations (${m.pct}%)`;
         item.innerHTML = `
           <div class="candidate-item-left">
             <span class="candidate-rank">${idx === 0 ? 'Played' : '#' + (idx + 1)}</span>
@@ -566,6 +629,7 @@ class ArenaApp {
           <div class="candidate-item-right">
             <span class="candidate-visits-badge" title="${m.visits} of ${total} search visits">${m.visits}/${total}</span>
             <span class="candidate-pct">${Math.round(m.pct)}%</span>
+            ${m.prior !== undefined ? `<span class="candidate-prior" style="--share:${m.prior}%"></span>` : ''}
             <span class="candidate-share" style="--share:${m.pct}%"></span>
           </div>
         `;
@@ -579,7 +643,7 @@ class ArenaApp {
 
     this.renderPlayerBars();
     this.renderHistory();
-    this.updateAiButton();
+    this.updateReviewNav();
 
     if (this.currentGame === 'chaturanga') {
       this.renderChaturanga();
@@ -635,21 +699,10 @@ class ArenaApp {
     return opt ? opt.textContent : id;
   }
 
-  // Usable only when an AI is to move and nothing is running
-  updateAiButton() {
-    if (!this.btnAiStep) return;
-    const gs = this.gameState;
-    const aiToMove = gs && !gs.is_terminal && gs.current_player_type !== 'human';
-    this.btnAiStep.disabled = this.isThinking || !aiToMove;
-    this.btnAiStep.title = this.isThinking ? 'The AI is searching'
-      : !gs ? '' : gs.is_terminal ? 'The game is over'
-      : aiToMove ? 'Ask the AI to play its move now'
-      : "It's a human player's turn: make your move on the board";
-  }
-
   formatPlayerName(id) {
     if (id === 'human') return 'Human';
     if (id.startsWith('az_')) return 'AlphaZero';
+    if (id.startsWith('ckpt_')) return `AlphaZero ${Number(id.slice(5)) + 1}`;
     if (id === 'baseline_alphabeta') return 'Alpha-Beta (3-ply)';
     if (id === 'baseline_greedy') return 'Greedy Material';
     if (id === 'random') return 'Random';
@@ -667,13 +720,15 @@ class ArenaApp {
     this.coordsRanks.innerHTML = displayRanks.map(r => `<div>${r}</div>`).join('');
     this.coordsFiles.innerHTML = displayFiles.map(f => `<div>${f}</div>`).join('');
 
-    // Render Grid
+    // Render Grid. While reviewing, show that ply's position (no moves allowed)
+    const reviewed = this.reviewIndex !== null ? this.positions[this.reviewIndex] : null;
+    const gs = reviewed ? { ...this.gameState, ...reviewed, legal_moves: [] } : this.gameState;
     this.chaturangaBoard.innerHTML = '';
-    const board = this.gameState.board; // 8x8 array [rank][file]
+    const board = gs.board; // 8x8 array [rank][file]
 
     const rankIndices = this.flipped ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
-    const enemyRaja = -6 * this.gameState.side_to_move;
-    const capturableRaja = new Set((this.gameState.legal_moves || [])
+    const enemyRaja = -6 * gs.side_to_move;
+    const capturableRaja = new Set((gs.legal_moves || [])
       .map(m => m.to_sq)
       .filter(t => board[Math.floor(t / 8)][t % 8] === enemyRaja));
     const fileIndices = this.flipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
@@ -695,7 +750,7 @@ class ArenaApp {
         }
 
         // Last move played
-        const last = this.gameState.last_move;
+        const last = gs.last_move;
         if (last && sqIdx === last.from_sq) sqDiv.classList.add('last-move-from');
         if (last && sqIdx === last.to_sq) sqDiv.classList.add('last-move-to');
 
@@ -841,16 +896,29 @@ class ArenaApp {
 
       const row = document.createElement('div');
       row.className = 'history-row';
+      const cls = ply => `history-move${this.reviewIndex === ply ? ' reviewing' : ''}`;
       row.innerHTML = `
         <span class="history-num">${moveNum}.</span>
-        <span class="history-move">${m1}</span>
-        <span class="history-move">${m2}</span>
+        <span class="${cls(i + 1)}" data-ply="${i + 1}">${m1}</span>
+        <span class="${cls(i + 2)}" data-ply="${i + 2}">${m2}</span>
       `;
+      if (this.gameState.is_terminal && this.currentGame === 'chaturanga') {
+        row.querySelectorAll('.history-move').forEach(el => {
+          if (!el.textContent) return;
+          el.classList.add('clickable');
+          el.addEventListener('click', () => {
+            const ply = Number(el.dataset.ply);
+            this.reviewGo(ply);   // loads the game first if needed
+          });
+        });
+      }
       this.historyList.appendChild(row);
     }
 
-    // Auto-scroll history
-    this.historyList.scrollTop = this.historyList.scrollHeight;
+    // Keep the newest move, or the move being reviewed, in view
+    const focus = this.historyList.querySelector('.reviewing');
+    if (focus) focus.scrollIntoView({ block: 'nearest' });
+    else this.historyList.scrollTop = this.historyList.scrollHeight;
   }
 
   checkGameOver() {
@@ -887,8 +955,14 @@ class ArenaApp {
     }
 
     this.gameOverTitle.textContent = winnerText;
-    this.gameOverDesc.textContent = `Game concluded. Reason: ${this.formatTerminalReason(reason)}`;
-    this.gameOverOverlay.style.display = 'flex';
+    const plies = this.gameState.ply_count || 0;
+    const moves = Math.ceil(plies / 2);
+    this.gameOverDesc.textContent =
+      `${this.formatTerminalReason(reason)} after ${moves} move${moves === 1 ? '' : 's'} (${plies} plies).`;
+    document.getElementById('btn-modal-review').style.display =
+      this.currentGame === 'chaturanga' ? '' : 'none';
+    // Don't cover the board again while the game is being reviewed
+    this.gameOverOverlay.style.display = this.reviewIndex === null ? 'flex' : 'none';
   }
 
   formatTerminalReason(reason) {

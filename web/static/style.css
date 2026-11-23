@@ -1714,3 +1714,148 @@ body {
 .under-board .candidate-visits-badge {
   display: none;
 }
+
+
+/* ==========================================================================
+   Features: strength slider, instinct vs search, game review
+   ========================================================================== */
+
+.strength-box {
+  margin-top: 0.75rem;
+}
+
+.strength-hint {
+  margin: 0.45rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+/* Instinct vs search */
+.instinct-line {
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.5rem;
+  border-radius: 8px;
+  border-left: 3px solid var(--text-dim);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.instinct-line.overruled {
+  border-left-color: var(--accent-cyan);
+  background: rgba(217, 178, 106, 0.08);
+}
+
+.instinct-line strong {
+  color: var(--text-main);
+}
+
+.candidate-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.bar-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.65rem;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.bar-key i {
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.key-net,
+.candidate-prior {
+  --bar-colour: #b9a9a3;
+}
+
+.key-net { background: #b9a9a3; }
+.key-search { background: var(--accent-cyan); margin-left: 0.35rem; }
+
+.candidate-prior {
+  display: block;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -9px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #b9a9a3 var(--share), rgba(255, 255, 255, 0.06) var(--share));
+}
+
+.under-board .candidate-item {
+  padding-bottom: 0.6rem;
+}
+
+/* Game review */
+.review-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.3rem;
+  margin-bottom: 0.45rem;
+}
+
+.review-nav[hidden] {
+  display: none;
+}
+
+.review-btn {
+  flex: none;
+  width: 30px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.review-btn:hover:not(:disabled) {
+  background: rgba(217, 178, 106, 0.2);
+}
+
+.review-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.review-pos {
+  flex: 1;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.history-move.clickable {
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.history-move.clickable:hover {
+  color: var(--accent-cyan);
+}
+
+.history-move.reviewing {
+  color: #23120b;
+  background: var(--accent-cyan);
+  padding: 0 4px;
+}
+
+.review-pos {
+  white-space: nowrap;
+}
