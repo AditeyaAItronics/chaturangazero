@@ -102,6 +102,95 @@ def _move_name(state, action: int, game: str) -> str:
             f"{cols[file_of(t_s)]}{rank_of(t_s)+1}")
 
 
+ANALYSIS_SIMS = 200      # simulations per position when analysing a game
+# Expected-score points a move may cost before it gets a label (0-100 scale)
+BLUNDER, MISTAKE, INACCURACY = 20.0, 10.0, 5.0
+BRILLIANT_MAX_PRIOR = 0.05   # the network gave the move under 5% on instinct...
+BRILLIANT_MIN_GAIN = 10.0    # ...and its own favourite was this many points worse
+ONLY_MOVE_GAP = 10.0         # "!": every reasonable alternative is this much worse
+DECIDED = 0.9                # |value| above this: the game is decided, no praise
+
+
+def _search_summary(state, evaluate, sims: int) -> dict:
+    """Search one position; values are from the side to move's view (-1..1)."""
+    done, z = state.is_terminal(adjudicate=False)
+    if done:
+        return {'terminal': True, 'value': float(z)}
+    _, root = search(state=state, evaluate=evaluate, n_sims=sims, action_size=4096,
+                     c_puct=1.5, add_noise=False, adjudicate=False, return_root=True)
+    acts = [int(a) for a in root.legal_actions]
+    visits = {a: int(n) for a, n in zip(acts, root.N)}
+    q = {a: float(w / n) for a, w, n in zip(acts, root.W, root.N) if n > 0}
+    prior = {a: float(pr) for a, pr in zip(acts, root.P)}
+    best = max(acts, key=lambda a: visits[a])
+    return {'terminal': False, 'value': q.get(best, 0.0), 'best': best,
+            'q': q, 'visits': visits, 'prior': prior}
+
+
+def _raja_captures(state, raja_code: int) -> list:
+    """Legal moves of the side to move that capture the piece `raja_code`."""
+    return [a for a in state.legal_moves()
+            if state.piece_at(decode_action(a)[1]) == raja_code]
+
+
+def classify_move(before, after, action: int, before_info: dict, after_info: dict) -> dict:
+    """
+    Label one move from searches of the positions before and after it.
+    Exact checks first (no check rule, so these decide games): a missed Raja
+    capture and a Raja left capturable are always blunders. Otherwise the
+    label comes from how many expected-score points the move cost the mover.
+    """
+    mover = before.side_to_move
+    v_best = before_info['value']                 # mover's value with best play
+    v_after = -after_info['value']                # mover's value after this move
+    loss = max(0.0, v_best - v_after) * 50.0      # expected-score points (0-100)
+    played_best = action == before_info.get('best')
+    wins_now = _raja_captures(before, -6 * mover)
+    result = {'loss': round(loss, 1), 'label': None, 'reason': None,
+              'white_before': round((v_best * mover + 1) / 2, 4),
+              'white_after': round((v_after * mover + 1) / 2, 4)}
+    if not played_best and before_info.get('best') is not None:
+        result['better'] = _move_name(before, before_info['best'], 'chaturanga')
+
+    if wins_now and action not in wins_now:
+        result.update(label='??', reason='Missed a Raja capture that wins on the spot')
+        return result
+    if not after_info['terminal'] and _raja_captures(after, 6 * mover):
+        result.update(label='??', reason='Leaves the Raja capturable: the opponent can win next move')
+        return result
+    if action in wins_now:
+        return result                              # the winning capture itself
+
+    if not played_best:
+        # Search noise can't make the best move look bad, so only non-best moves lose
+        for cut, label, word in ((BLUNDER, '??', 'Blunder'), (MISTAKE, '?', 'Mistake'),
+                                 (INACCURACY, '?!', 'Inaccuracy')):
+            if loss >= cut:
+                result.update(label=label, reason=f'{word}: costs {loss:.0f} points of expected score')
+                return result
+        return result
+
+    q, prior = before_info.get('q') or {}, before_info.get('prior') or {}
+    if abs(v_best) > DECIDED or not prior:
+        return result                              # decided game, or nothing to compare
+    instinct = max(prior, key=prior.get)
+    if (prior.get(action, 0.0) < BRILLIANT_MAX_PRIOR and instinct != action
+            and instinct in q and (v_best - q[instinct]) * 50.0 >= BRILLIANT_MIN_GAIN):
+        result.update(label='!!', reason=(
+            f"Brilliant: the network gave it only {prior[action] * 100:.0f}% on instinct; "
+            f"its favourite ({_move_name(before, instinct, 'chaturanga')}) was "
+            f"{(v_best - q[instinct]) * 50:.0f} points worse"))
+        return result
+    total = sum(before_info['visits'].values()) or 1
+    rivals = [q[a] for a, n in before_info['visits'].items()
+              if a != action and a in q and n >= 0.05 * total]
+    if rivals and (v_best - max(rivals)) * 50.0 >= ONLY_MOVE_GAP:
+        result.update(label='!', reason=(
+            f"Good: the only strong move; the next best was "
+            f"{(v_best - max(rivals)) * 50:.0f} points worse"))
+    return result
+
+
 def _checkpoint_info(path: str) -> dict:
     """Iteration, architecture and training size of a checkpoint (cached by mtime)."""
     key = (path, os.path.getmtime(path))
@@ -223,6 +312,7 @@ class GameSession:
         self.move_log = []
         self.actions = []   # actions played, parallel to move_log
         self.evals = []     # White's expected score (0-1) after each move, None if unknown
+        self.analysis = {}  # (ply, model, sims) -> search summary of that position
 
     def current_player_type(self) -> str:
         # P1 is side 1 (White / Red), P2 is side -1 (Black / Yellow)
@@ -450,6 +540,40 @@ def game_positions():
     return jsonify({'positions': positions})
 
 
+@app.route('/api/analyze_move', methods=['POST'])
+@_with_session_lock
+def analyze_move():
+    """Label move `ply` (0-based) of the current Chaturanga game, judged by `model`."""
+    if current_session.game != 'chaturanga':
+        return jsonify({'error': 'analysis is for Chaturanga games'}), 400
+    body = request.get_json(silent=True) or {}
+    model = body.get('model', 'az_best')
+    try:
+        ply = int(body.get('ply', -1))
+        sims = max(MIN_SIMS, min(MAX_SIMS, int(body.get('sims', ANALYSIS_SIMS))))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'ply and sims must be integers'}), 400
+    if not 0 <= ply < len(current_session.actions):
+        return jsonify({'error': f'no move {ply}'}), 400
+    _, evaluate = get_model('chaturanga', model)
+    if evaluate is None:
+        return jsonify({'error': f'no checkpoint for {model}'}), 400
+
+    states = list(current_session.history) + [current_session.state]
+
+    def summary(k):
+        key = (k, model, sims)
+        if key not in current_session.analysis:
+            current_session.analysis[key] = _search_summary(states[k], evaluate, sims)
+        return current_session.analysis[key]
+
+    action = current_session.actions[ply]
+    result = classify_move(states[ply], states[ply + 1], action, summary(ply), summary(ply + 1))
+    result.update(ply=ply + 1, move=_move_name(states[ply], action, 'chaturanga'),
+                  side='White' if states[ply].side_to_move == 1 else 'Black')
+    return jsonify(result)
+
+
 @app.route('/api/state', methods=['GET'])
 @_with_session_lock
 def get_state():
@@ -468,6 +592,7 @@ def new_game():
     current_session.p1_type = p1
     current_session.p2_type = p2
     current_session.reset()
+    current_session.analysis = {}
 
     return jsonify(serialize_state(current_session))
 
@@ -647,6 +772,7 @@ def undo_move():
         return jsonify({'error': 'no moves to undo'}), 400
 
     # Pop last state
+    current_session.analysis = {}       # positions after the undone move are gone
     current_session.state = current_session.history.pop()
     if current_session.move_log:
         current_session.move_log.pop()

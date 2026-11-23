@@ -86,6 +86,7 @@
               <p class="game-over-desc" id="game-over-desc">White won by Raja capture.</p>
               <div class="game-over-actions">
                 <button class="btn btn-secondary" id="btn-modal-review">Review game</button>
+                <button class="btn btn-secondary" id="btn-modal-analyse">Analyse moves</button>
                 <button class="btn btn-primary" id="btn-modal-restart">Play Again</button>
               </div>
             </div>
@@ -126,9 +127,12 @@
           <!-- Move History Card -->
           <div class="panel-card history-card">
             <div class="history-header">
-              <h3 class="panel-title">Move History</h3>
+              <h3 class="panel-title">History</h3>
+              <button class="analyse-btn" id="btn-analyse" hidden
+                      title="Judge every move with the best model's search">🔍 Analyse</button>
               <span class="ply-counter" id="ply-counter">Ply: 0</span>
             </div>
+            <div class="analysis-summary" id="analysis-summary" hidden></div>
             <div class="review-nav" id="review-nav" hidden>
               <button class="review-btn" id="review-first" title="Start position">⏮</button>
               <button class="review-btn" id="review-prev" title="Previous move (←)">◀</button>

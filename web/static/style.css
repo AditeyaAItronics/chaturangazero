@@ -1960,3 +1960,97 @@ body {
 .momentum-tip[hidden] {
   display: none;
 }
+
+
+/* ==========================================================================
+   Move analysis: blunders and brilliant moves
+   ========================================================================== */
+
+.history-header {
+  gap: 0.5rem;
+}
+
+.history-header .panel-title {
+  margin-right: auto;
+}
+
+.analyse-btn {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 6px;
+  border: 1px solid rgba(217, 178, 106, 0.4);
+  background: rgba(217, 178, 106, 0.12);
+  color: var(--text-main);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.analyse-btn:hover:not(:disabled) {
+  background: rgba(217, 178, 106, 0.25);
+}
+
+.analyse-btn:disabled {
+  cursor: progress;
+  opacity: 0.8;
+}
+
+.analyse-btn[hidden] {
+  display: none;
+}
+
+.move-label {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.5;
+  cursor: help;
+}
+
+.lab-blunder     { color: #ff8a98; background: rgba(224, 33, 63, 0.22); }
+.lab-mistake     { color: #f5a868; background: rgba(240, 140, 60, 0.18); }
+.lab-inaccuracy  { color: #ead28a; background: rgba(232, 194, 90, 0.14); }
+.lab-good        { color: #a9d68c; background: rgba(143, 191, 106, 0.16); }
+.lab-brilliant   { color: #7fe0d2; background: rgba(79, 195, 180, 0.2); }
+
+.analysis-summary {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 0.45rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.analysis-summary[hidden] {
+  display: none;
+}
+
+.analysis-summary strong {
+  color: var(--text-main);
+  margin-right: 2px;
+}
+
+.analysis-summary .none,
+.analysis-summary .judge {
+  color: var(--text-dim);
+  font-size: 0.68rem;
+}
+
+/* Markers for blunders and brilliant moves on the momentum chart */
+.mom-mark {
+  stroke: var(--bg-dark);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.mom-mark.lab-blunder   { fill: #ff5a6e; }
+.mom-mark.lab-brilliant { fill: #4fc3b4; }
+
+.history-header .panel-title,
+.history-header .ply-counter {
+  white-space: nowrap;
+}

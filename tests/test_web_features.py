@@ -117,3 +117,114 @@ def test_momentum_evals_follow_moves_and_undo(web):
     assert ai_eval == pytest.approx((state['ai_stats']['value'] + 1) / 2, abs=1e-3)
     state = client.post('/api/undo').get_json()  # undoes the AI reply and the human move
     assert state['evals'] == [] and state['move_history'] == []
+
+
+# --- Move analysis: blunders and brilliant moves -----------------------------
+
+import numpy as np
+from chaturanga.board import State, WHITE, BLACK, RAJA, RATHA, PADATI, sq
+from chaturanga.moves import encode_action
+
+
+def _position(pieces, side=WHITE):
+    board = np.zeros(64, dtype=np.int8)
+    for (rank, file), piece in pieces.items():
+        board[sq(rank, file)] = piece
+    return State(board=board, side_to_move=side, ply_count=10)
+
+
+def _info(value, best=None, q=None, visits=None, prior=None, terminal=False):
+    return {'terminal': terminal, 'value': value, 'best': best, 'q': q or {},
+            'visits': visits or {}, 'prior': prior or {}}
+
+
+@pytest.fixture
+def classify():
+    pytest.importorskip('flask')
+    from web import app as web_app
+    return web_app.classify_move
+
+
+def test_missing_a_raja_capture_is_a_blunder(classify):
+    # White's Ratha on h1 can take Black's Raja on h8; White plays Raja a1-a2 instead
+    before = _position({(0, 0): RAJA, (0, 7): RATHA, (7, 7): -RAJA, (6, 0): -PADATI})
+    capture, other = encode_action(sq(0, 7), sq(7, 7)), encode_action(sq(0, 0), sq(1, 0))
+    r = classify(before, before.apply(other), other, _info(1.0, best=capture), _info(0.0))
+    assert r['label'] == '??' and 'Missed a Raja capture' in r['reason']
+    # Playing the capture itself is never labelled a mistake
+    r = classify(before, before.apply(capture), capture, _info(1.0, best=capture),
+                 _info(-1.0, terminal=True))
+    assert r['label'] is None
+
+
+def test_leaving_the_raja_capturable_is_a_blunder(classify):
+    # White's Raja steps from d1 onto the e-file, where Black's Ratha on e8 takes it
+    before = _position({(0, 3): RAJA, (7, 4): -RATHA, (7, 0): -RAJA, (1, 7): PADATI})
+    move = encode_action(sq(0, 3), sq(0, 4))
+    r = classify(before, before.apply(move), move, _info(0.0, best=move), _info(0.0))
+    assert r['label'] == '??' and 'Raja capturable' in r['reason']
+
+
+@pytest.mark.parametrize('after_value, label', [
+    (0.1, '??'),    # mover 0.5 -> -0.1: loses 30 points
+    (-0.2, '?'),    # 0.5 -> 0.2: 15 points
+    (-0.35, '?!'),  # 0.5 -> 0.35: 7.5 points
+    (-0.45, None),  # 2.5 points: noise, no label
+])
+def test_loss_thresholds(classify, after_value, label):
+    start = State()
+    move, best = start.legal_moves()[0], start.legal_moves()[1]
+    r = classify(start, start.apply(move), move, _info(0.5, best=best), _info(after_value))
+    assert r['label'] == label
+    if label:
+        assert r['better']                       # names the search's preferred move
+
+
+def test_the_search_best_move_is_never_called_a_mistake(classify):
+    start = State()
+    move = start.legal_moves()[0]
+    # Even if the next position's search comes out much lower (search noise)
+    r = classify(start, start.apply(move), move, _info(0.5, best=move, q={move: 0.5}), _info(0.4))
+    assert r['label'] is None
+
+
+def test_brilliant_and_only_moves(classify):
+    start = State()
+    move, instinct, other = start.legal_moves()[:3]
+    q = {move: 0.3, instinct: -0.1, other: 0.25}
+    visits = {move: 120, instinct: 60, other: 20}
+    # Search's best, network gave it 2%, its favourite is 20 points worse: brilliant
+    r = classify(start, start.apply(move), move,
+                 _info(0.3, best=move, q=q, visits=visits, prior={move: 0.02, instinct: 0.6, other: 0.2}),
+                 _info(-0.3))
+    assert r['label'] == '!!'
+    # Network liked it too, but every serious alternative is >= 10 points worse: only move
+    q2 = {move: 0.3, instinct: 0.05, other: 0.05}
+    r = classify(start, start.apply(move), move,
+                 _info(0.3, best=move, q=q2, visits=visits, prior={move: 0.5, instinct: 0.3, other: 0.2}),
+                 _info(-0.3))
+    assert r['label'] == '!'
+    # A decided game gets no praise
+    r = classify(start, start.apply(move), move,
+                 _info(0.95, best=move, q=q2, visits=visits, prior={move: 0.02, instinct: 0.6}),
+                 _info(-0.95))
+    assert r['label'] is None
+
+
+def test_analyze_move_endpoint(web):
+    web_app, client = web
+    state = _new_game(client, 'human', 'human').get_json()
+    for _ in range(3):
+        state = client.post('/api/make_move', json={'action': state['legal_moves'][0]['action']}).get_json()
+    results = [client.post('/api/analyze_move', json={'ply': k, 'sims': 10}).get_json() for k in range(3)]
+    assert [r['ply'] for r in results] == [1, 2, 3]
+    assert [r['side'] for r in results] == ['White', 'Black', 'White']
+    for r in results:
+        assert set(r) >= {'label', 'reason', 'loss', 'white_before', 'white_after', 'move'}
+        assert 0 <= r['white_after'] <= 1
+    # Consecutive moves share a position: one search, cached
+    assert results[0]['white_after'] == results[1]['white_before']
+    assert len(web_app.current_session.analysis) == 4
+    assert client.post('/api/analyze_move', json={'ply': 3}).status_code == 400
+    client.post('/api/undo')
+    assert web_app.current_session.analysis == {}

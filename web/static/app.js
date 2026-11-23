@@ -12,6 +12,12 @@ const CHATURANGA_PIECES = Object.fromEntries(
   }])
 );
 
+// Move-quality labels from /api/analyze_move (symbol carries the meaning; colour helps)
+const MOVE_LABEL_CLASS = { '??': 'lab-blunder', '?': 'lab-mistake', '?!': 'lab-inaccuracy',
+                           '!': 'lab-good', '!!': 'lab-brilliant' };
+const MOVE_LABEL_NAME = { '??': 'Blunders', '?': 'Mistakes', '?!': 'Inaccuracies',
+                          '!': 'Good (only) moves', '!!': 'Brilliant moves' };
+
 // Ashtapada special cross squares: a1, d1, e1, h1, a4, d4, e4, h4, a5, d5, e5, h5, a8, d8, e8, h8
 const ASHTAPADA_SPECIAL_SQS = new Set([0, 3, 4, 7, 24, 27, 28, 31, 32, 35, 36, 39, 56, 59, 60, 63]);
 
@@ -27,6 +33,9 @@ class ArenaApp {
     this.autoPlayDelay = 600; // ms delay between moves
     this.reviewIndex = null;  // ply shown while reviewing a finished game
     this.positions = [];      // every position of the game, from /api/positions
+    this.analysis = [];       // per move: {label, reason, ...} from /api/analyze_move
+    this.analysing = false;
+    this.overlayDismissed = false; // game-over card closed for this game (review/analyse)
     this.playSims = 200;      // set by the search-strength slider
     // Set when an AI move request fails: automatic AI moves stop (no endless
     // retry loop) until the next human action, new game, undo, or Pause/Resume.
@@ -129,6 +138,9 @@ class ArenaApp {
       const cardSims = document.getElementById('model-sims');
       if (cardSims) cardSims.textContent = this.playSims;
     });
+
+    document.getElementById('btn-analyse').addEventListener('click', () => this.analyseGame());
+    document.getElementById('btn-modal-analyse').addEventListener('click', () => this.analyseGame());
 
     // Reviewing a finished game
     this.reviewNav = document.getElementById('review-nav');
@@ -354,6 +366,8 @@ class ArenaApp {
     this.autoAiPaused = false;
     this.reviewIndex = null;
     this.positions = [];
+    this.analysis = [];
+    this.overlayDismissed = false;
     this.gameOverOverlay.style.display = 'none';
 
     try {
@@ -490,6 +504,8 @@ class ArenaApp {
         this.autoAiPaused = false;
         this.reviewIndex = null;
         this.positions = [];
+        this.analysis = [];
+        this.overlayDismissed = false;
         this.gameState = await res.json();
         this.selectedSq = null;
         this.legalTargets.clear();
@@ -552,6 +568,7 @@ class ArenaApp {
       return;
     }
     if (!this.positions.length) return;
+    this.overlayDismissed = true;
     this.gameOverOverlay.style.display = 'none';
     this.reviewGo(target);
   }
@@ -584,6 +601,64 @@ class ArenaApp {
     document.getElementById('review-last').disabled = this.reviewIndex === null || at === last;
   }
 
+  // ------------------------------------------------------------- analysis
+  // After a Chaturanga game, judge every move with the best model's search,
+  // one move per request so the button can show progress.
+  async analyseGame() {
+    if (this.analysing || !this.gameState?.is_terminal) return;
+    this.overlayDismissed = true;
+    this.gameOverOverlay.style.display = 'none';
+    const moves = (this.gameState.move_history || []).length;
+    this.analysing = true;
+    this.analysis = new Array(moves).fill(null);
+    try {
+      for (let ply = 0; ply < moves; ply++) {
+        this.renderAnalysisControls(ply, moves);
+        const res = await fetch('/api/analyze_move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ply })
+        });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.status);
+        this.analysis[ply] = await res.json();
+      }
+    } catch (err) {
+      console.error('Analysis failed:', err);
+      this.analysis = [];
+    } finally {
+      this.analysing = false;
+      this.render();
+    }
+  }
+
+  renderAnalysisControls(done, total) {
+    const btn = document.getElementById('btn-analyse');
+    const box = document.getElementById('analysis-summary');
+    const canAnalyse = this.currentGame === 'chaturanga' && this.gameState?.is_terminal
+      && (this.gameState.move_history || []).length > 0;
+    btn.hidden = !canAnalyse;
+    if (this.analysing) {
+      btn.disabled = true;
+      btn.textContent = `Analysing ${done ?? 0}/${total ?? '…'}`;
+    } else {
+      btn.disabled = false;
+      btn.textContent = this.analysis.length ? '🔍 Re-analyse' : '🔍 Analyse';
+    }
+    const complete = this.analysis.length && this.analysis.every(Boolean);
+    box.hidden = !complete;
+    if (!complete) return;
+    const sides = ['White', 'Black'];
+    const order = ['!!', '!', '?!', '?', '??'];
+    box.innerHTML = sides.map(side => {
+      const mine = this.analysis.filter(a => a.side === side && a.label);
+      const chips = order.map(l => {
+        const n = mine.filter(a => a.label === l).length;
+        return n ? `<span class="move-label ${MOVE_LABEL_CLASS[l]}" title="${MOVE_LABEL_NAME[l]}">${n}× ${l}</span>` : '';
+      }).join('');
+      return `<div><strong>${side}</strong> ${chips || '<span class="none">no labels</span>'}</div>`;
+    }).join('') + '<div class="judge">Judged by the best model\'s search (200 simulations per position)</div>';
+  }
+
   // ------------------------------------------------------------- momentum
   // White's expected score (from each AlphaZero move's search) per ply. Above
   // the 50% line White is better (gold), below it Black (rose); position, not
@@ -596,9 +671,14 @@ class ArenaApp {
     const box = document.getElementById('momentum-chart');
     const evals = this.gameState.evals || [];
     const plies = Math.max(evals.length, 1);
-    // Points: ply 0 starts level; then every ply with a known value
-    const pts = [[0, 0.5]];
-    evals.forEach((v, i) => { if (v !== null && v !== undefined) pts.push([i + 1, v]); });
+    // Points: ply 0 starts level; then every ply with a known value. A finished
+    // analysis judges every position with one model, so it replaces them.
+    const analysed = this.analysis.length === evals.length && evals.length > 0
+      && this.analysis.every(Boolean);
+    const pts = analysed
+      ? [[0, this.analysis[0].white_before], ...this.analysis.map((a, i) => [i + 1, a.white_after])]
+      : [[0, 0.5]];
+    if (!analysed) evals.forEach((v, i) => { if (v !== null && v !== undefined) pts.push([i + 1, v]); });
 
     const W = 600, H = 84, PAD_L = 4, PAD_R = 4, PAD_T = 6, PAD_B = 6;
     const x = ply => PAD_L + (ply / plies) * (W - PAD_L - PAD_R);
@@ -621,6 +701,9 @@ class ArenaApp {
         <line class="mom-mid" x1="0" x2="${W}" y1="${mid}" y2="${mid}"/>
         <path class="mom-line" d="${line}"/>
         ${marker}
+        ${analysed ? this.analysis.map((a, i) => (a.label === '??' || a.label === '!!')
+          ? `<circle class="mom-mark ${MOVE_LABEL_CLASS[a.label]}" cx="${x(i + 1)}" cy="${y(a.white_after)}" r="5"/>`
+          : '').join('') : ''}
         <line class="mom-hover" id="mom-hover" x1="0" x2="0" y1="${PAD_T}" y2="${H - PAD_B}" visibility="hidden"/>
       </svg>
       <span class="mom-label top">White better</span>
@@ -646,7 +729,8 @@ class ArenaApp {
       hover.setAttribute('x1', x(p)); hover.setAttribute('x2', x(p));
       hover.setAttribute('visibility', 'visible');
       const move = p === 0 ? 'Start' : `After ${this.gameState.move_history?.[p - 1] || 'ply ' + p}`;
-      tip.textContent = `${move} · White ${pct(v)}% – Black ${100 - pct(v)}%`;
+      const lab = p > 0 && this.analysis[p - 1]?.label ? ` · ${this.analysis[p - 1].label}` : '';
+      tip.textContent = `${move}${lab} · White ${pct(v)}% – Black ${100 - pct(v)}%`;
       tip.hidden = false;
       const r = box.getBoundingClientRect();
       tip.style.left = `${Math.min(Math.max((x(p) / W) * r.width, 70), r.width - 70)}px`;
@@ -720,6 +804,7 @@ class ArenaApp {
     this.renderPlayerBars();
     this.renderHistory();
     this.updateReviewNav();
+    this.renderAnalysisControls();
     this.renderMomentum();
 
     if (this.currentGame === 'chaturanga') {
@@ -974,10 +1059,16 @@ class ArenaApp {
       const row = document.createElement('div');
       row.className = 'history-row';
       const cls = ply => `history-move${this.reviewIndex === ply ? ' reviewing' : ''}`;
+      const mark = idx => {
+        const a = this.analysis[idx];
+        if (!a || !a.label) return '';
+        const extra = a.better ? ` Better: ${a.better}.` : '';
+        return `<span class="move-label ${MOVE_LABEL_CLASS[a.label]}" title="${a.reason}.${extra}">${a.label}</span>`;
+      };
       row.innerHTML = `
         <span class="history-num">${moveNum}.</span>
-        <span class="${cls(i + 1)}" data-ply="${i + 1}">${m1}</span>
-        <span class="${cls(i + 2)}" data-ply="${i + 2}">${m2}</span>
+        <span class="${cls(i + 1)}" data-ply="${i + 1}">${m1}${mark(i)}</span>
+        <span class="${cls(i + 2)}" data-ply="${i + 2}">${m2}${m2 ? mark(i + 1) : ''}</span>
       `;
       if (this.gameState.is_terminal && this.currentGame === 'chaturanga') {
         row.querySelectorAll('.history-move').forEach(el => {
@@ -1036,10 +1127,12 @@ class ArenaApp {
     const moves = Math.ceil(plies / 2);
     this.gameOverDesc.textContent =
       `${this.formatTerminalReason(reason)} after ${moves} move${moves === 1 ? '' : 's'} (${plies} plies).`;
-    document.getElementById('btn-modal-review').style.display =
-      this.currentGame === 'chaturanga' ? '' : 'none';
-    // Don't cover the board again while the game is being reviewed
-    this.gameOverOverlay.style.display = this.reviewIndex === null ? 'flex' : 'none';
+    const chat = this.currentGame === 'chaturanga' ? '' : 'none';
+    document.getElementById('btn-modal-review').style.display = chat;
+    document.getElementById('btn-modal-analyse').style.display = chat;
+    // Once closed for review or analysis, don't cover the board again this game
+    this.gameOverOverlay.style.display =
+      this.reviewIndex === null && !this.overlayDismissed ? 'flex' : 'none';
   }
 
   formatTerminalReason(reason) {
