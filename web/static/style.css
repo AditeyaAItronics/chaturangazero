@@ -31,7 +31,19 @@
   --board-last-move: rgba(245, 158, 11, 0.3);
   --board-target: rgba(6, 182, 212, 0.6);
   --board-capture: rgba(244, 63, 94, 0.6);
-  --board-ashtapada-cross: rgba(255, 255, 255, 0.12);
+  --board-ashtapada-cross: rgba(92, 51, 23, 0.55);
+
+  /* Ashtapada board (sandstone squares in a dark wood frame) */
+  --board-sq-light: #ecd6a8;
+  --board-sq-dark: #c99d64;
+  --board-frame: #3b2414;
+  --board-frame-edge: #6b4426;
+
+  /* Pieces: ivory against maroon */
+  --piece-white: #f8efd8;
+  --piece-white-line: #4a2c14;
+  --piece-black: #8c1d2f;
+  --piece-black-line: #f2cf8a;
 
   /* Connect-4 Colors */
   --c4-frame: #1e3a8a;
@@ -363,10 +375,10 @@ body {
   display: grid;
   grid-template-columns: 24px 1fr;
   grid-template-rows: 1fr 24px;
-  background: #141a29;
+  background: linear-gradient(145deg, var(--board-frame-edge), var(--board-frame) 60%);
   padding: 8px;
   border-radius: 16px;
-  border: 2px solid rgba(255, 255, 255, 0.1);
+  border: 2px solid rgba(242, 207, 138, 0.25);
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6), inset 0 2px 6px rgba(255, 255, 255, 0.05);
 }
 
@@ -413,11 +425,11 @@ body {
 }
 
 .sq.light {
-  background-color: #2b3548;
+  background-color: var(--board-sq-light);
 }
 
 .sq.dark {
-  background-color: #1a2233;
+  background-color: var(--board-sq-dark);
 }
 
 /* Ashtapada Cross Markings on special squares */
@@ -434,7 +446,8 @@ body {
   top: 50%;
   left: 12%;
   width: 76%;
-  height: 2px;
+  height: 3px;
+  border-radius: 2px;
   transform: translateY(-50%) rotate(45deg);
 }
 
@@ -442,7 +455,8 @@ body {
   top: 50%;
   left: 12%;
   width: 76%;
-  height: 2px;
+  height: 3px;
+  border-radius: 2px;
   transform: translateY(-50%) rotate(-45deg);
 }
 
@@ -1226,5 +1240,219 @@ body {
 
 .thinking-subtitle {
   font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+
+/* ==========================================================================
+   Chaturanga look: SVG pieces, rules panel, footer mode switch
+   ========================================================================== */
+
+/* Coordinates sit on the wood frame */
+.chaturanga-board-container .board-coords {
+  color: rgba(242, 207, 138, 0.75);
+}
+
+/* SVG pieces (pieces.js). Body = currentColor, outline = --piece-line */
+.piece-svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.piece-svg path,
+.piece-svg circle {
+  fill: currentColor;
+  stroke: var(--piece-line);
+  stroke-width: 3;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.piece-svg .pc-line,
+.piece-svg .pc-tusk {
+  fill: none;
+}
+
+.piece-svg .pc-tusk {
+  stroke: #fffaf0;
+  stroke-width: 4.5;
+}
+
+.piece-svg .pc-eye,
+.piece-svg .pc-hub,
+.piece-svg .pc-detail {
+  fill: var(--piece-line);
+  stroke: none;
+}
+
+.piece-svg .pc-trunk-o {
+  fill: none;
+  stroke-width: 14;
+}
+
+.piece-svg .pc-trunk {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 8;
+}
+
+/* Black's thin details (spear, pillars, plume) in maroon with a gold edge,
+   so they stay visible on light squares */
+.piece-svg.black-piece .pc-detail {
+  fill: currentColor;
+  stroke: var(--piece-line);
+  stroke-width: 2;
+}
+
+.piece-svg.white-piece {
+  color: var(--piece-white);
+  --piece-line: var(--piece-white-line);
+}
+
+.piece-svg.black-piece {
+  color: var(--piece-black);
+  --piece-line: var(--piece-black-line);
+}
+
+.piece {
+  width: 84%;
+  height: 84%;
+  font-size: 0;
+  filter: drop-shadow(0 3px 3px rgba(40, 20, 5, 0.55));
+}
+
+/* Avatars and captured pieces reuse the same drawings */
+.player-avatar .piece-svg {
+  width: 30px;
+  height: 30px;
+}
+
+.captured-box .piece-svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* Highlights tuned for the light board */
+.sq.selected {
+  background-color: #e8b04a !important;
+  box-shadow: inset 0 0 0 3px #8c5a14;
+}
+
+.sq.last-move-from,
+.sq.last-move-to {
+  background-color: #dcc070 !important;
+}
+
+.sq.legal-target::after {
+  background: rgba(26, 94, 82, 0.75);
+  box-shadow: none;
+}
+
+/* Tagline instead of a version badge */
+.brand-sub {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+/* Rules panel */
+.rules-card .rules-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0;
+}
+
+.rules-card .rules-summary::-webkit-details-marker {
+  display: none;
+}
+
+.rules-card .rules-summary::after {
+  content: '▾';
+  color: var(--text-dim);
+  transition: transform var(--transition-fast);
+}
+
+.rules-card:not([open]) .rules-summary::after {
+  transform: rotate(-90deg);
+}
+
+.rules-list {
+  margin: 0.85rem 0 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.rules-list strong {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.rules-pieces {
+  margin-top: 0.9rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.rules-pieces > span {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.key-icon {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--board-sq-light);
+}
+
+/* Footer: Chaturanga is the project, Connect-4 is the pipeline check */
+.app-footer {
+  display: flex;
+  justify-content: center;
+  padding: 0.5rem 0 1rem;
+}
+
+.app-footer .game-tabs {
+  background: transparent;
+  border: none;
+  padding: 0;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.app-footer .tab-btn {
+  padding: 0.25rem 0.5rem;
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+
+.app-footer .tab-btn.active {
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.footer-sep {
   color: var(--text-dim);
 }

@@ -3,20 +3,14 @@
  */
 
 // Piece Unicode maps
-const CHATURANGA_PIECES = {
-  1: { symbol: '♙', name: 'Padati (Pawn)', class: 'white-piece' },
-  2: { symbol: '♘', name: 'Ashva (Knight)', class: 'white-piece' },
-  3: { symbol: '♗', name: 'Gaja (Elephant)', class: 'white-piece' },
-  4: { symbol: '♖', name: 'Ratha (Rook)', class: 'white-piece' },
-  5: { symbol: '♕', name: 'Mantri (Counselor)', class: 'white-piece' },
-  6: { symbol: '♔', name: 'Raja (King)', class: 'white-piece' },
-  '-1': { symbol: '♟', name: 'Padati (Pawn)', class: 'black-piece' },
-  '-2': { symbol: '♞', name: 'Ashva (Knight)', class: 'black-piece' },
-  '-3': { symbol: '♝', name: 'Gaja (Elephant)', class: 'black-piece' },
-  '-4': { symbol: '♜', name: 'Ratha (Rook)', class: 'black-piece' },
-  '-5': { symbol: '♛', name: 'Mantri (Counselor)', class: 'black-piece' },
-  '-6': { symbol: '♚', name: 'Raja (King)', class: 'black-piece' }
-};
+// Piece drawings live in pieces.js (pieceSVG, PIECE_NAMES_UI)
+const CHATURANGA_PIECES = Object.fromEntries(
+  [1, 2, 3, 4, 5, 6, -1, -2, -3, -4, -5, -6].map(code => [code, {
+    svg: pieceSVG(code),
+    name: PIECE_NAMES_UI[Math.abs(code)],
+    class: code > 0 ? 'white-piece' : 'black-piece',
+  }])
+);
 
 // Ashtapada special cross squares: a1, d1, e1, h1, a4, d4, e4, h4, a5, d5, e5, h5, a8, d8, e8, h8
 const ASHTAPADA_SPECIAL_SQS = new Set([0, 3, 4, 7, 24, 27, 28, 31, 32, 35, 36, 39, 56, 59, 60, 63]);
@@ -74,6 +68,12 @@ class ArenaApp {
     this.p2MaterialScore = document.getElementById('p2-material-score');
     this.p1Avatar = document.getElementById('p1-avatar');
     this.p2Avatar = document.getElementById('p2-avatar');
+    // Initial avatars and the rules panel's piece key use the SVG piece set
+    this.p1Avatar.innerHTML = pieceSVG(6);
+    this.p2Avatar.innerHTML = pieceSVG(-6);
+    document.querySelectorAll('.key-icon').forEach(el => {
+      el.innerHTML = pieceSVG(Number(el.dataset.piece));
+    });
     this.p1ThinkingBadge = document.getElementById('p1-thinking-badge');
     this.p2ThinkingBadge = document.getElementById('p2-thinking-badge');
 
@@ -195,8 +195,9 @@ class ArenaApp {
       this.tabConnect4.classList.remove('active');
       this.chaturangaContainer.style.display = 'grid';
       this.connect4Container.style.display = 'none';
-      this.p1Avatar.textContent = '♔';
-      this.p2Avatar.textContent = '♚';
+      document.getElementById('rules-panel').style.display = '';
+      this.p1Avatar.innerHTML = pieceSVG(6);
+      this.p2Avatar.innerHTML = pieceSVG(-6);
       this.p1MaterialScore.style.display = 'inline-block';
       this.p2MaterialScore.style.display = 'inline-block';
     } else {
@@ -204,6 +205,7 @@ class ArenaApp {
       this.tabChaturanga.classList.remove('active');
       this.chaturangaContainer.style.display = 'none';
       this.connect4Container.style.display = 'flex';
+      document.getElementById('rules-panel').style.display = 'none';
       this.p1Avatar.textContent = '🔴';
       this.p2Avatar.textContent = '🟡';
       this.p1MaterialScore.style.display = 'none';
@@ -564,11 +566,11 @@ class ArenaApp {
       this.p2MaterialScore.textContent = `Score: ${this.gameState.black_material.toFixed(1)}`;
 
       this.p1CapturedBox.innerHTML = (this.gameState.white_captured || [])
-        .map(p => CHATURANGA_PIECES[-p]?.symbol || '')
+        .map(p => CHATURANGA_PIECES[-p]?.svg || '')
         .join(' ');
 
       this.p2CapturedBox.innerHTML = (this.gameState.black_captured || [])
-        .map(p => CHATURANGA_PIECES[p]?.symbol || '')
+        .map(p => CHATURANGA_PIECES[p]?.svg || '')
         .join(' ');
     }
   }
@@ -636,7 +638,7 @@ class ArenaApp {
           if (pieceInfo) {
             const pieceDiv = document.createElement('span');
             pieceDiv.className = `piece ${pieceInfo.class}`;
-            pieceDiv.textContent = pieceInfo.symbol;
+            pieceDiv.innerHTML = pieceInfo.svg;
             pieceDiv.title = pieceInfo.name;
             sqDiv.appendChild(pieceDiv);
           }

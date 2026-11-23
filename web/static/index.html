@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ChaturangaZero & Connect-4 Arena</title>
-  <meta name="description" content="Minimalist, modern arena to play Chaturanga (Ashtapada) and Connect-4 against AlphaZero models, Alpha-Beta baselines, or humans.">
+  <title>ChaturangaZero</title>
+  <meta name="description" content="Play Chaturanga, the ancient Indian ancestor of chess, against an AlphaZero agent trained purely by self-play.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
@@ -18,21 +18,9 @@
         <div class="brand-badge">
           <span class="brand-dot"></span>
           <span class="brand-title">ChaturangaZero</span>
-          <span class="brand-sub">Arena v1.0</span>
+          <span class="brand-sub">AlphaZero self-play for ancient Indian chess</span>
         </div>
       </div>
-
-      <!-- Game Selector Tabs -->
-      <nav class="game-tabs" id="game-tabs">
-        <button class="tab-btn active" id="tab-chaturanga" data-game="chaturanga">
-          <span class="tab-icon">♟️</span>
-          <span class="tab-label">Chaturanga (8×8)</span>
-        </button>
-        <button class="tab-btn" id="tab-connect4" data-game="connect4">
-          <span class="tab-icon">🔴</span>
-          <span class="tab-label">Connect-4 (6×7)</span>
-        </button>
-      </nav>
 
       <div class="header-right">
         <button class="btn btn-secondary" id="btn-flip-board" title="Flip Board Perspective">
@@ -51,7 +39,7 @@
         <!-- Opponent Status Bar -->
         <div class="player-bar top-player" id="player-p2-bar">
           <div class="player-info">
-            <span class="player-avatar" id="p2-avatar">♚</span>
+            <span class="player-avatar" id="p2-avatar"></span>
             <div>
               <div class="player-header-line">
                 <span class="player-name" id="p2-display-name">Black (AlphaZero)</span>
@@ -106,7 +94,7 @@
         <!-- Player Status Bar -->
         <div class="player-bar bottom-player" id="player-p1-bar">
           <div class="player-info">
-            <span class="player-avatar" id="p1-avatar">♔</span>
+            <span class="player-avatar" id="p1-avatar"></span>
             <div>
               <div class="player-header-line">
                 <span class="player-name" id="p1-display-name">White (Human)</span>
@@ -125,6 +113,28 @@
 
       <!-- Right Column: Matchup Config, AI Thoughts, & History -->
       <aside class="sidebar-section">
+        <!-- Rules of this variant -->
+        <details class="panel-card rules-card" id="rules-panel" open>
+          <summary class="panel-title rules-summary">How this variant works</summary>
+          <ul class="rules-list">
+            <li><strong>There is no check.</strong> Any move is legal, even leaving your Raja attacked.</li>
+            <li><strong>Capture the Raja to win.</strong> The game ends only when a Raja is actually taken.</li>
+            <li><strong>Stalemate wins</strong> for the player who cannot move.</li>
+            <li><strong>Bare Raja loses</strong> (Raja against Raja is a draw).</li>
+            <li><strong>Gaja</strong> jumps exactly two squares diagonally, over anything.</li>
+            <li><strong>Mantri</strong> moves one square diagonally. <strong>Padati</strong> moves one step, no double step, and always promotes to Mantri.</li>
+            <li>No castling, no en passant, no repetition or 50-move rule; games stop at 300 plies.</li>
+          </ul>
+          <div class="rules-pieces" aria-label="Piece key">
+            <span><span class="key-icon" data-piece="4"></span>Ratha · chariot</span>
+            <span><span class="key-icon" data-piece="2"></span>Ashva · horse</span>
+            <span><span class="key-icon" data-piece="3"></span>Gaja · elephant</span>
+            <span><span class="key-icon" data-piece="5"></span>Mantri · minister</span>
+            <span><span class="key-icon" data-piece="6"></span>Raja · king</span>
+            <span><span class="key-icon" data-piece="1"></span>Padati · soldier</span>
+          </div>
+        </details>
+
         <!-- Matchup Config Card -->
         <div class="panel-card matchup-card">
           <h3 class="panel-title">Player Matchup</h3>
@@ -215,8 +225,18 @@
         </div>
       </aside>
     </main>
+
+    <!-- Connect-4 is the pipeline check (Phase 0), kept out of the way -->
+    <footer class="app-footer">
+      <nav class="game-tabs" id="game-tabs" aria-label="Game">
+        <button class="tab-btn active" id="tab-chaturanga" data-game="chaturanga">Chaturanga</button>
+        <span class="footer-sep">·</span>
+        <button class="tab-btn" id="tab-connect4" data-game="connect4">Pipeline check: Connect-4</button>
+      </nav>
+    </footer>
   </div>
 
+  <script src="pieces.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
