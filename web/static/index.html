@@ -112,6 +112,17 @@
         </div>
         <!-- Under the board: move history, then the AI's search -->
         <div class="under-board">
+          <!-- Momentum: White's expected score over the game -->
+          <div class="panel-card momentum-card" id="momentum-card">
+            <div class="momentum-head">
+              <h3 class="panel-title">Momentum</h3>
+              <span class="momentum-now" id="momentum-now">50% – 50%</span>
+            </div>
+            <div class="momentum-chart" id="momentum-chart"
+                 role="img" aria-label="White's expected score over the game, from the AI's search"></div>
+            <div class="momentum-tip" id="momentum-tip" hidden></div>
+          </div>
+
           <!-- Move History Card -->
           <div class="panel-card history-card">
             <div class="history-header">

@@ -584,6 +584,82 @@ class ArenaApp {
     document.getElementById('review-last').disabled = this.reviewIndex === null || at === last;
   }
 
+  // ------------------------------------------------------------- momentum
+  // White's expected score (from each AlphaZero move's search) per ply. Above
+  // the 50% line White is better (gold), below it Black (rose); position, not
+  // only colour, carries the side. Hover for the value; after the game, click
+  // to jump to that position.
+  renderMomentum() {
+    const card = document.getElementById('momentum-card');
+    if (this.currentGame !== 'chaturanga') { card.style.display = 'none'; return; }
+    card.style.display = '';
+    const box = document.getElementById('momentum-chart');
+    const evals = this.gameState.evals || [];
+    const plies = Math.max(evals.length, 1);
+    // Points: ply 0 starts level; then every ply with a known value
+    const pts = [[0, 0.5]];
+    evals.forEach((v, i) => { if (v !== null && v !== undefined) pts.push([i + 1, v]); });
+
+    const W = 600, H = 84, PAD_L = 4, PAD_R = 4, PAD_T = 6, PAD_B = 6;
+    const x = ply => PAD_L + (ply / plies) * (W - PAD_L - PAD_R);
+    const y = v => PAD_T + (1 - v) * (H - PAD_T - PAD_B);
+    const mid = y(0.5);
+    const line = pts.map(([p, v], i) => `${i ? 'L' : 'M'}${x(p).toFixed(1)},${y(v).toFixed(1)}`).join('');
+    const area = `${line}L${x(pts[pts.length - 1][0]).toFixed(1)},${mid}L${x(0)},${mid}Z`;
+    const marker = this.reviewIndex !== null
+      ? `<line class="mom-cursor" x1="${x(this.reviewIndex)}" x2="${x(this.reviewIndex)}" y1="${PAD_T}" y2="${H - PAD_B}"/>`
+      : '';
+    const lastPt = pts[pts.length - 1];
+    box.innerHTML = `
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="mom-svg">
+        <defs>
+          <clipPath id="mom-above"><rect x="0" y="0" width="${W}" height="${mid}"/></clipPath>
+          <clipPath id="mom-below"><rect x="0" y="${mid}" width="${W}" height="${H - mid}"/></clipPath>
+        </defs>
+        <path class="mom-area white-ahead" d="${area}" clip-path="url(#mom-above)"/>
+        <path class="mom-area black-ahead" d="${area}" clip-path="url(#mom-below)"/>
+        <line class="mom-mid" x1="0" x2="${W}" y1="${mid}" y2="${mid}"/>
+        <path class="mom-line" d="${line}"/>
+        ${marker}
+        <line class="mom-hover" id="mom-hover" x1="0" x2="0" y1="${PAD_T}" y2="${H - PAD_B}" visibility="hidden"/>
+      </svg>
+      <span class="mom-label top">White better</span>
+      <span class="mom-label bottom">Black better</span>`;
+
+    const pct = v => Math.round(v * 100);
+    document.getElementById('momentum-now').textContent =
+      pts.length > 1 ? `White ${pct(lastPt[1])}% – Black ${100 - pct(lastPt[1])}%` : 'No AI evaluation yet';
+    box.setAttribute('aria-label', pts.length > 1
+      ? `White's expected score over ${plies} plies; now ${pct(lastPt[1])}%`
+      : "White's expected score: no AI evaluation yet");
+
+    // Hover: nearest evaluated ply; click: review that position after the game
+    const tip = document.getElementById('momentum-tip');
+    const hover = box.querySelector('#mom-hover');
+    const nearest = ev => {
+      const r = box.getBoundingClientRect();
+      const ply = Math.round(((ev.clientX - r.left) / r.width) * plies);
+      return pts.reduce((best, p) => Math.abs(p[0] - ply) < Math.abs(best[0] - ply) ? p : best, pts[0]);
+    };
+    box.onmousemove = ev => {
+      const [p, v] = nearest(ev);
+      hover.setAttribute('x1', x(p)); hover.setAttribute('x2', x(p));
+      hover.setAttribute('visibility', 'visible');
+      const move = p === 0 ? 'Start' : `After ${this.gameState.move_history?.[p - 1] || 'ply ' + p}`;
+      tip.textContent = `${move} · White ${pct(v)}% – Black ${100 - pct(v)}%`;
+      tip.hidden = false;
+      const r = box.getBoundingClientRect();
+      tip.style.left = `${Math.min(Math.max((x(p) / W) * r.width, 70), r.width - 70)}px`;
+    };
+    box.onmouseleave = () => { tip.hidden = true; hover.setAttribute('visibility', 'hidden'); };
+    box.onclick = ev => {
+      if (!this.gameState.is_terminal) return;
+      this.reviewGo(nearest(ev)[0]);
+    };
+    box.classList.toggle('clickable', !!this.gameState.is_terminal);
+    box.title = this.gameState.is_terminal ? 'Click to review the game from that point' : '';
+  }
+
   updateAiInsights(stats) {
     if (!stats) return;
 
@@ -644,6 +720,7 @@ class ArenaApp {
     this.renderPlayerBars();
     this.renderHistory();
     this.updateReviewNav();
+    this.renderMomentum();
 
     if (this.currentGame === 'chaturanga') {
       this.renderChaturanga();

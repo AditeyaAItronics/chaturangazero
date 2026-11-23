@@ -101,3 +101,19 @@ def test_positions_follow_the_game_and_undo(web):
     positions = client.get('/api/positions').get_json()['positions']
     assert len(positions) == 2
     assert positions[-1]['last_move'] == dict(zip(('from_sq', 'to_sq'), decode_action(played[0])))
+
+
+def test_momentum_evals_follow_moves_and_undo(web):
+    _, client = web
+    state = _new_game(client, 'human', 'ckpt_0003').get_json()
+    assert state['evals'] == []
+    move = state['legal_moves'][0]['action']
+    client.post('/api/make_move', json={'action': move})
+    state = client.post('/api/ai_move', json={'sims': 10}).get_json()
+    human_eval, ai_eval = state['evals']
+    assert human_eval is None                    # no search ran for the human move
+    assert 0.0 <= ai_eval <= 1.0
+    # White's expected score = (value from White's view + 1) / 2
+    assert ai_eval == pytest.approx((state['ai_stats']['value'] + 1) / 2, abs=1e-3)
+    state = client.post('/api/undo').get_json()  # undoes the AI reply and the human move
+    assert state['evals'] == [] and state['move_history'] == []
