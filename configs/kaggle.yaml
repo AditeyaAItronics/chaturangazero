@@ -1,0 +1,71 @@
+# Kaggle continuation of the 1,000-iteration run (resume from checkpoint_0999.pt).
+# Differences from configs/pilot.yaml (the published run's exact settings):
+#   train.lr 2e-3 -> 2e-4, with reset_lr_on_resume so the checkpoint's saved
+#     2e-5 does not override it; no further LR decay (lr_milestones: []).
+#   play.adjudicate_margin 4.0 -> 2.0 (RULES.md §2.2 response to a high cap
+#     rate; training-only, arena games at the cap are still draws).
+#   loop.parallel_games 8 -> 32 and device auto, to batch more on the GPU.
+#   loop.iterations 1100 (override with --iterations).
+#
+# Run (from the repo root, with the run directory holding checkpoint_0999.pt and best.pt):
+#   python train_chaturanga.py --config configs/kaggle.yaml --output RUN_DIR --resume auto
+#   The first log lines must say "Learning rate: 2.00e-04 ... reset from config".
+arena:
+  every_n_iters: 10
+  games: 40
+  opening_plies: 4
+  promotion_alpha: 0.05
+  sims: 40
+  win_threshold: 0.55
+device: auto
+game: chaturanga
+loop:
+  games_per_iter: 32
+  iterations: 1100
+  parallel_games: 32
+  workers: 3
+mcts:
+  c_puct: 1.5
+  dirichlet_alpha: 0.3
+  dirichlet_eps: 0.25
+  eval_cache_size: 50000
+  fpu_reduction: null
+  leaves_per_step: 1
+  reuse_subtree: true
+  sims: 40
+  virtual_loss: 3
+net:
+  action_space: 4096
+  blocks: 5
+  channels: 64
+  input_planes: 14
+play:
+  adjudicate_margin: 2.0
+  move_cap: 300
+  temp_moves: 20
+rules:
+  bare_king: loss
+  castling: false
+  check_rule: none
+  fifty_move_rule: false
+  pawn_double_step: false
+  promotion: mantri_only
+  repetition_draw: false
+  stalemate: side_to_move_wins
+seed: 20260829
+train:
+  amp_inference: false
+  batch_size: 128
+  buffer_size: 100000
+  grad_clip: 1.0
+  l2: 0.0001
+  lr: 0.0002
+  lr_gamma: 0.1
+  lr_milestones: []
+  reset_lr_on_resume: true
+  min_buffer: 1000
+  mirror_augment: true
+  optimizer: adamw
+  replay_ratio: 3.0
+  steps_per_iter: 200
+  weight_decay: 0.01
