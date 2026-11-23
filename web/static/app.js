@@ -277,7 +277,7 @@ class ArenaApp {
 
     // 1. Action button state
     if (this.btnAiStep) {
-      this.btnAiStep.disabled = isThinking;
+      this.updateAiButton();
       if (isThinking) {
         this.btnAiStep.classList.add('is-thinking');
         this.btnAiStep.innerHTML = `
@@ -286,7 +286,7 @@ class ArenaApp {
         `;
       } else {
         this.btnAiStep.classList.remove('is-thinking');
-        this.btnAiStep.innerHTML = `⚡ Trigger AI Move`;
+        this.btnAiStep.innerHTML = `⚡ Make AI move`;
       }
     }
 
@@ -363,6 +363,9 @@ class ArenaApp {
         })
       });
       this.gameState = await res.json();
+      if (this.selectP1.value === 'human') this.flipped = false;
+      else if (this.selectP2.value === 'human') this.flipped = true;
+      // (AI vs AI keeps whatever Flip View says)
       this.render();
     } catch (err) {
       console.error('Failed to start new game:', err);
@@ -525,6 +528,8 @@ class ArenaApp {
 
   updateEvalLabels() {
     const c4 = this.currentGame === 'connect4';
+    document.getElementById('label-p1').textContent = c4 ? 'Red' : 'White';
+    document.getElementById('label-p2').textContent = c4 ? 'Yellow' : 'Black';
     document.getElementById('eval-label-p1').textContent = c4 ? 'Red' : 'White';
     document.getElementById('eval-label-p2').textContent = c4 ? 'Yellow' : 'Black';
     document.getElementById('model-card').style.display = c4 ? 'none' : '';
@@ -573,6 +578,7 @@ class ArenaApp {
 
     this.renderPlayerBars();
     this.renderHistory();
+    this.updateAiButton();
 
     if (this.currentGame === 'chaturanga') {
       this.renderChaturanga();
@@ -602,13 +608,15 @@ class ArenaApp {
     this.p1DisplayName.textContent = `${p1Label} (${this.formatPlayerName(this.gameState.p1_type)})`;
     this.p2DisplayName.textContent = `${p2Label} (${this.formatPlayerName(this.gameState.p2_type)})`;
 
-    this.p1ModelBadge.textContent = `Type: ${this.gameState.p1_type}`;
-    this.p2ModelBadge.textContent = `Type: ${this.gameState.p2_type}`;
+    this.p1ModelBadge.textContent = this.playerDescription(this.gameState.p1_type);
+    this.p2ModelBadge.textContent = this.playerDescription(this.gameState.p2_type);
 
     // Material Scores & Captured Pieces for Chaturanga
     if (this.currentGame === 'chaturanga') {
-      this.p1MaterialScore.textContent = `Score: ${this.gameState.white_material.toFixed(1)}`;
-      this.p2MaterialScore.textContent = `Score: ${this.gameState.black_material.toFixed(1)}`;
+      this.p1MaterialScore.textContent = `Material ${this.gameState.white_material.toFixed(1)}`;
+      this.p2MaterialScore.textContent = `Material ${this.gameState.black_material.toFixed(1)}`;
+      this.p1MaterialScore.title = this.p2MaterialScore.title =
+        'Piece values: Ratha 5, Ashva 3, Gaja 1.5, Mantri 1.5, Padati 1 (Raja not counted)';
 
       this.p1CapturedBox.innerHTML = (this.gameState.white_captured || [])
         .map(p => CHATURANGA_PIECES[-p]?.svg || '')
@@ -618,6 +626,24 @@ class ArenaApp {
         .map(p => CHATURANGA_PIECES[p]?.svg || '')
         .join(' ');
     }
+  }
+
+  playerDescription(id) {
+    if (id === 'human') return 'Human player';
+    const opt = [...this.selectP1.options].find(o => o.value === id);
+    return opt ? opt.textContent : id;
+  }
+
+  // Usable only when an AI is to move and nothing is running
+  updateAiButton() {
+    if (!this.btnAiStep) return;
+    const gs = this.gameState;
+    const aiToMove = gs && !gs.is_terminal && gs.current_player_type !== 'human';
+    this.btnAiStep.disabled = this.isThinking || !aiToMove;
+    this.btnAiStep.title = this.isThinking ? 'The AI is searching'
+      : !gs ? '' : gs.is_terminal ? 'The game is over'
+      : aiToMove ? 'Ask the AI to play its move now'
+      : "It's a human player's turn: make your move on the board";
   }
 
   formatPlayerName(id) {
@@ -645,6 +671,10 @@ class ArenaApp {
     const board = this.gameState.board; // 8x8 array [rank][file]
 
     const rankIndices = this.flipped ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+    const enemyRaja = -6 * this.gameState.side_to_move;
+    const capturableRaja = new Set((this.gameState.legal_moves || [])
+      .map(m => m.to_sq)
+      .filter(t => board[Math.floor(t / 8)][t % 8] === enemyRaja));
     const fileIndices = this.flipped ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
 
     rankIndices.forEach(r => {
@@ -661,6 +691,18 @@ class ArenaApp {
         // Ashtapada special cross markings
         if (ASHTAPADA_SPECIAL_SQS.has(sqIdx)) {
           sqDiv.classList.add('ashtapada-special');
+        }
+
+        // Last move played
+        const last = this.gameState.last_move;
+        if (last && sqIdx === last.from_sq) sqDiv.classList.add('last-move-from');
+        if (last && sqIdx === last.to_sq) sqDiv.classList.add('last-move-to');
+
+        // A Raja the side to move can capture right now (there is no check:
+        // the warning is all you get)
+        if (capturableRaja.has(sqIdx)) {
+          sqDiv.classList.add('raja-capturable');
+          sqDiv.title = 'This Raja can be captured this move';
         }
 
         // Selection highlight

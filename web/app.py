@@ -204,6 +204,7 @@ class GameSession:
             self.state = Connect4State()
         self.history = []
         self.move_log = []
+        self.actions = []   # actions played, parallel to move_log
 
     def current_player_type(self) -> str:
         # P1 is side 1 (White / Red), P2 is side -1 (Black / Yellow)
@@ -313,6 +314,9 @@ def serialize_state(session: GameSession) -> dict:
             'white_captured': white_captured,
             'black_captured': black_captured,
             'move_history': session.move_log,
+            'last_move': ({'from_sq': int(decode_action(session.actions[-1])[0]),
+                           'to_sq': int(decode_action(session.actions[-1])[1])}
+                          if session.actions else None),
         }
     else:
         # Connect-4
@@ -457,6 +461,7 @@ def make_move():
         notation = f"Col {action + 1}"
 
     current_session.move_log.append(notation)
+    current_session.actions.append(int(action))
     current_session.state = state.apply(action)
 
     return jsonify(serialize_state(current_session))
@@ -566,6 +571,7 @@ def ai_move():
         notation = f"Col {chosen_action + 1}"
 
     current_session.move_log.append(notation)
+    current_session.actions.append(int(chosen_action))
     current_session.state = state.apply(chosen_action)
 
     resp = serialize_state(current_session)
@@ -584,16 +590,22 @@ def undo_move():
     current_session.state = current_session.history.pop()
     if current_session.move_log:
         current_session.move_log.pop()
+    if current_session.actions:
+        current_session.actions.pop()
 
     # If the user is playing against an AI, pop again so it returns to human's turn
     if current_session.p1_type == 'human' and current_session.p2_type != 'human' and current_session.state.side_to_move == -1 and current_session.history:
         current_session.state = current_session.history.pop()
         if current_session.move_log:
             current_session.move_log.pop()
+        if current_session.actions:
+            current_session.actions.pop()
     elif current_session.p2_type == 'human' and current_session.p1_type != 'human' and current_session.state.side_to_move == 1 and current_session.history:
         current_session.state = current_session.history.pop()
         if current_session.move_log:
             current_session.move_log.pop()
+        if current_session.actions:
+            current_session.actions.pop()
 
     return jsonify(serialize_state(current_session))
 
