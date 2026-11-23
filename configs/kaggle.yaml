@@ -5,6 +5,11 @@
 #   play.adjudicate_margin 4.0 -> 2.0 (RULES.md §2.2 response to a high cap
 #     rate; training-only, arena games at the cap are still draws).
 #   loop.parallel_games 8 -> 32 and device auto, to batch more on the GPU.
+#   Session 2 (more decisive self-play; session 1 drew 37.5% of games):
+#   play.move_cap 300 -> 200 and mcts.dirichlet_eps 0.25 -> 0.35, the next two
+#   RULES.md §2.2 responses after the 2.0 margin. Both are training devices:
+#   the input encoding keeps its fixed 300-ply scale, and capped arena games
+#   are still draws.
 #   loop.iterations 1100 (override with --iterations).
 #
 # Run (from the repo root, with the run directory holding checkpoint_0999.pt and best.pt):
@@ -27,7 +32,7 @@ loop:
 mcts:
   c_puct: 1.5
   dirichlet_alpha: 0.3
-  dirichlet_eps: 0.25
+  dirichlet_eps: 0.35
   eval_cache_size: 50000
   fpu_reduction: null
   leaves_per_step: 1
@@ -41,7 +46,7 @@ net:
   input_planes: 14
 play:
   adjudicate_margin: 2.0
-  move_cap: 300
+  move_cap: 200
   temp_moves: 20
 rules:
   bare_king: loss
