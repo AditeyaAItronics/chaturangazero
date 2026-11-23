@@ -28,7 +28,7 @@ class ArenaApp {
     this.playSims = 200;      // replaced by /api/model_info
     // Set when an AI move request fails: automatic AI moves stop (no endless
     // retry loop) until the next human action, new game, undo or Auto-Play toggle.
-    // The "Trigger AI Move" button still works.
+    // The "Make AI move" button still works.
     this.autoAiPaused = false;
     this.autoPlayTimer = null;
     this.isThinking = false;

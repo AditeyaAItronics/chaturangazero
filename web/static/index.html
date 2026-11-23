@@ -109,10 +109,101 @@
           <div class="captured-box" id="p1-captured-box"></div>
           <div class="material-score" id="p1-material-score">Score: 0.0</div>
         </div>
+        <!-- Under the board: move history, then the AI's search -->
+        <div class="under-board">
+          <!-- Move History Card -->
+          <div class="panel-card history-card">
+            <div class="history-header">
+              <h3 class="panel-title">Move History</h3>
+              <span class="ply-counter" id="ply-counter">Ply: 0</span>
+            </div>
+            <div class="history-list" id="history-list"></div>
+          </div>
+
+          <!-- AI Insights & Value Evaluation Card -->
+          <div class="panel-card ai-insights-card" id="ai-insights-panel">
+            <h3 class="panel-title">What the AI is thinking</h3>
+            <div class="eval-bar-container">
+              <div class="eval-bar-label">
+                <span id="eval-label-p1">White</span>
+                <span id="eval-value-text" title="Expected score from the AI's search: win = 100%, draw = 50%">50% – 50%</span>
+                <span id="eval-label-p2">Black</span>
+              </div>
+              <div class="eval-bar-track">
+                <div class="eval-bar-fill" id="eval-bar-fill" style="width: 50%;"></div>
+              </div>
+            </div>
+
+            <div class="mcts-candidates" id="mcts-candidates-box">
+              <div class="candidate-header" id="candidate-header">Moves the search spent the most time on</div>
+              <div class="candidates-list" id="candidates-list">
+                <div class="empty-state">The AI's top candidate moves appear here after it moves.</div>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
 
-      <!-- Right Column: Matchup Config, AI Thoughts, & History -->
+      <!-- Right Column: game controls, model card, rules -->
       <aside class="sidebar-section">
+        <!-- Matchup Config Card -->
+        <div class="panel-card matchup-card">
+          <h3 class="panel-title">Player Matchup</h3>
+          <div class="matchup-selectors">
+            <!-- Player 1 Select -->
+            <div class="selector-group">
+              <label for="select-p1" class="selector-label">
+                <span class="piece-indicator white-indicator"></span> <span id="label-p1">White</span>
+              </label>
+              <select id="select-p1" class="custom-select"></select>
+            </div>
+
+            <!-- VS Divider -->
+            <div class="vs-divider">
+              <span class="vs-line"></span>
+              <span class="vs-badge">VS</span>
+              <span class="vs-line"></span>
+            </div>
+
+            <!-- Player 2 Select -->
+            <div class="selector-group">
+              <label for="select-p2" class="selector-label">
+                <span class="piece-indicator black-indicator"></span> <span id="label-p2">Black</span>
+              </label>
+              <select id="select-p2" class="custom-select"></select>
+            </div>
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="matchup-actions">
+            <button class="btn btn-accent" id="btn-ai-step">
+              ⚡ Make AI move
+            </button>
+            <button class="btn btn-secondary" id="btn-autoplay">
+              ▶ Auto-Play: OFF
+            </button>
+            <button class="btn btn-outline" id="btn-undo">
+              ↩ Undo Move
+            </button>
+          </div>
+
+          <!-- Auto-Play Speed & Delay Slider -->
+          <div class="speed-control-box">
+            <div class="speed-header">
+              <label for="speed-slider" class="speed-label">
+                <span class="speed-icon">⏱</span>
+                <span>Pause before AI moves</span>
+              </label>
+              <span class="speed-badge" id="speed-display">0.60s</span>
+            </div>
+            <div class="slider-wrapper">
+              <span class="slider-limit">Short (0.1s)</span>
+              <input type="range" id="speed-slider" min="100" max="2500" step="50" value="600" class="speed-range-slider" aria-label="Pause before AI moves">
+              <span class="slider-limit">Long (2.5s)</span>
+            </div>
+          </div>
+        </div>
+
         <!-- Model card: what the AlphaZero player is -->
         <div class="panel-card model-card" id="model-card">
           <div class="model-card-head">
@@ -145,94 +236,6 @@
           </div>
         </details>
 
-        <!-- Matchup Config Card -->
-        <div class="panel-card matchup-card">
-          <h3 class="panel-title">Player Matchup</h3>
-          <div class="matchup-selectors">
-            <!-- Player 1 Select -->
-            <div class="selector-group">
-              <label for="select-p1" class="selector-label">
-                <span class="piece-indicator white-indicator"></span> <span id="label-p1">White</span>
-              </label>
-              <select id="select-p1" class="custom-select"></select>
-            </div>
-
-            <!-- VS Divider -->
-            <div class="vs-divider">
-              <span class="vs-line"></span>
-              <span class="vs-badge">VS</span>
-              <span class="vs-line"></span>
-            </div>
-
-            <!-- Player 2 Select -->
-            <div class="selector-group">
-              <label for="select-p2" class="selector-label">
-                <span class="piece-indicator black-indicator"></span> <span id="label-p2">Black</span>
-              </label>
-              <select id="select-p2" class="custom-select"></select>
-            </div>
-          </div>
-
-          <!-- Action Buttons -->
-          <div class="matchup-actions">
-            <button class="btn btn-accent" id="btn-ai-step">
-              ⚡ Trigger AI Move
-            </button>
-            <button class="btn btn-secondary" id="btn-autoplay">
-              ▶ Auto-Play: OFF
-            </button>
-            <button class="btn btn-outline" id="btn-undo">
-              ↩ Undo Move
-            </button>
-          </div>
-
-          <!-- Auto-Play Speed & Delay Slider -->
-          <div class="speed-control-box">
-            <div class="speed-header">
-              <label for="speed-slider" class="speed-label">
-                <span class="speed-icon">⏱</span>
-                <span>Pause before AI moves</span>
-              </label>
-              <span class="speed-badge" id="speed-display">0.60s</span>
-            </div>
-            <div class="slider-wrapper">
-              <span class="slider-limit">Short (0.1s)</span>
-              <input type="range" id="speed-slider" min="100" max="2500" step="50" value="600" class="speed-range-slider" aria-label="Pause before AI moves">
-              <span class="slider-limit">Long (2.5s)</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- AI Insights & Value Evaluation Card -->
-        <div class="panel-card ai-insights-card" id="ai-insights-panel">
-          <h3 class="panel-title">What the AI is thinking</h3>
-          <div class="eval-bar-container">
-            <div class="eval-bar-label">
-              <span id="eval-label-p1">White</span>
-              <span id="eval-value-text" title="Expected score from the AI's search: win = 100%, draw = 50%">50% – 50%</span>
-              <span id="eval-label-p2">Black</span>
-            </div>
-            <div class="eval-bar-track">
-              <div class="eval-bar-fill" id="eval-bar-fill" style="width: 50%;"></div>
-            </div>
-          </div>
-
-          <div class="mcts-candidates" id="mcts-candidates-box">
-            <div class="candidate-header" id="candidate-header">Moves the search spent the most time on</div>
-            <div class="candidates-list" id="candidates-list">
-              <div class="empty-state">The AI's top candidate moves appear here after it moves.</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Move History Card -->
-        <div class="panel-card history-card">
-          <div class="history-header">
-            <h3 class="panel-title">Move History</h3>
-            <span class="ply-counter" id="ply-counter">Ply: 0</span>
-          </div>
-          <div class="history-list" id="history-list"></div>
-        </div>
       </aside>
     </main>
 
