@@ -150,3 +150,19 @@ From the code review (`needtofix.md`). These are the bugs that would have silent
 8. **The replay buffer would have needed ~20 GB** at 1M positions.
 
 ⏳ Add anything that goes wrong during the main run, for example cap-rate spikes or plateaus, and what you changed in response.
+
+## 10. Future work
+
+### A small draw penalty against move-cap shuffling
+
+With no repetition or 50-move rule, a large share of games run to the 300-ply cap. In evaluation these count as draws, so arena matches between two strong networks are mostly drawn and can barely tell them apart. The project's §2.2 responses are a tighter cap (300 → 200) and a smaller adjudication margin (4.0 → 2.0), both training-only.
+
+A further option, used by some game engines, is a small **draw penalty** ("contempt"): score a capped draw as about **−0.1 for both players** instead of 0 in the self-play value targets, so the network prefers lines that lead to a decisive result over safe shuffling. We did not try it, because:
+
+- **It breaks zero-sum scoring.** Both sides lose value on a draw, so the value head no longer predicts the plain game result, and the search's backed-up values change meaning.
+- **The size needs tuning.** Too small does nothing; too large makes the agent take unsound risks to avoid draws. That needs ablation runs we did not have compute for.
+- **It must stay training-only.** Like material adjudication, it would not be a rule: arena and evaluation games would still score a capped game as a plain draw.
+
+A fair test: two continuation runs from the same checkpoint, identical except for the draw penalty (0 vs −0.1), compared on cap rate, self-play draw rate and a head-to-head match.
+
+We deliberately did **not** add hand-made penalties for specific mistakes, such as losing material or leaving the Raja capturable. The agent's only training signal is the game result; shaped penalties make it optimise our scoring rather than winning, and can block correct sacrifices. The one recurring mistake we measured, missed Raja captures (about 3% of chances late in training), is a search issue, not a missing penalty.
