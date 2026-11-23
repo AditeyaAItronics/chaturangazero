@@ -174,6 +174,31 @@ def score_interval(results: list, z: float = 1.96) -> tuple[float, float]:
     return max(0.0, centre - half), min(1.0, centre + half)
 
 
+def paired_p_value(results: list) -> float:
+    """Exact one-sided sign-flip test over color-swapped opening pairs.
+
+    Under the null, player labels are exchangeable within each independent
+    opening pair. Enumerate the null distribution of the total pair outcome;
+    draws and tied pairs contribute no evidence. No normal approximation.
+    """
+    if not results or len(results) % 2:
+        raise ValueError('Paired promotion requires a nonempty even number of games')
+    if any(r not in (-1, 0, 1) for r in results):
+        raise ValueError('Arena outcomes must be -1, 0, or 1')
+    pairs = [int(results[i] + results[i + 1]) for i in range(0, len(results), 2)]
+    observed = sum(pairs)
+    distribution = {0: 1}
+    for weight in map(abs, pairs):
+        if not weight:
+            continue
+        updated = {}
+        for total, count in distribution.items():
+            for value in (total - weight, total + weight):
+                updated[value] = updated.get(value, 0) + count
+        distribution = updated
+    return sum(count for total, count in distribution.items() if total >= observed) / sum(distribution.values())
+
+
 def gate_model(
     challenger: Callable,
     incumbent: Callable,

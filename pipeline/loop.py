@@ -22,7 +22,7 @@ from pathlib import Path
 from net.model import DualHeadNet, create_chaturanga_net, create_connect4_net
 from net.replay import ReplayBuffer, list_shards, load_shards, prune_shards, save_shard
 from net.train import Trainer, create_evaluator
-from search.arena import gate_model, score_interval
+from search.arena import gate_model, score_interval, paired_p_value
 from search.baselines import random_player
 from search.mcts import search, select_action_with_temperature
 from pipeline.selfplay import run_self_play_batch
@@ -308,6 +308,16 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
     arena_sims = int(config['arena'].get('sims', n_sims))
     
     opening_plies = config['arena'].get('opening_plies', 4)
+    # Paired sign-flip gate (the 500/1,000-iteration runs used 0.05): a
+    # challenger also needs one-sided p < alpha over colour-swapped opening
+    # pairs. None keeps the score-only gate. Checked here, not after an arena.
+    alpha = config['arena'].get('promotion_alpha')
+    if alpha is not None:
+        if not 0 < alpha < 1:
+            raise ValueError('promotion_alpha must be between 0 and 1')
+        if arena_games % 2 or opening_plies <= 0:
+            raise ValueError('promotion_alpha needs an even arena.games and opening_plies > 0, '
+                             'so games come in colour-swapped opening pairs')
     
     # Training metrics log — on resume, keep the history up to the resume point
     metrics_log = []
@@ -562,13 +572,17 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
                 fpu_reduction=config['mcts'].get('fpu_reduction'),
             )
             promoted = arena_stats['p1_win_rate'] >= win_threshold
+            p_value = paired_p_value(arena_stats['results']) if alpha is not None else None
+            if alpha is not None:
+                promoted = promoted and p_value < alpha
             ci_low, ci_high = score_interval(arena_stats['results'])
             print(f"  Arena took {time.time() - arena_start:.1f}s", flush=True)
             
             status_str = "PROMOTED (New best!)" if promoted else "REJECTED (Incumbent retained)"
             print(f"  Arena result: Challenger {arena_stats['p1_wins']}W-{arena_stats['draws']}D-{arena_stats['p2_wins']}L "
                   f"(Score: {arena_stats['p1_win_rate']:.1%}, 95% CI {ci_low:.1%}-{ci_high:.1%}, "
-                  f"{arena_sims} sims) -> {status_str}", flush=True)
+                  f"{arena_sims} sims"
+                  f"{f', paired p={p_value:.6f}, alpha={alpha}' if p_value is not None else ''}) -> {status_str}", flush=True)
             
             if promoted:
                 best_net.load_state_dict(net.state_dict())
@@ -584,6 +598,7 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
                 'losses': arena_stats['p2_wins'], 'score': arena_stats['p1_win_rate'],
                 'score_ci95': [ci_low, ci_high], 'sims': arena_sims,
                 'promoted': bool(promoted),
+                'p_value': p_value, 'promotion_alpha': alpha,
             }
         
         # Log metrics
