@@ -33,8 +33,11 @@ if __name__ == '__main__':
                        help='Override games per iteration')
     parser.add_argument('--no-mirror', action='store_true',
                        help='Disable mirror augmentation (the mirror ablation run)')
+    parser.add_argument('--reset-lr', action='store_true',
+                       help="On resume, restart the LR at the config's train.lr instead of "
+                            "the checkpoint's saved LR (sets train.reset_lr_on_resume)")
     add_device_argument(parser)
-    
+
     args = parser.parse_args()
     
     print("ChaturangaZero — Self-play AlphaZero for Chaturanga")
@@ -47,6 +50,8 @@ if __name__ == '__main__':
         config['loop']['games_per_iter'] = args.games
     if args.no_mirror:
         config['train']['mirror_augment'] = False
+    if args.reset_lr:
+        config['train']['reset_lr_on_resume'] = True
     
     # Print key config
     print(f"Config: {args.config}")

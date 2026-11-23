@@ -246,6 +246,17 @@ def training_loop(config: dict, output_dir: str = 'runs', resume_from: str = Non
         print(f"Resuming from {resume_from}")
         checkpoint = trainer.load_checkpoint(resume_from)
         start_iteration = checkpoint.get('iteration', 0) + 1
+        if config['train'].get('reset_lr_on_resume', False):
+            # The checkpoint's saved LR and milestones override the config;
+            # this restarts the schedule from train.lr instead
+            trainer.reset_lr(config['train']['lr'],
+                             lr_milestones=config['train'].get('lr_milestones'),
+                             lr_gamma=config['train'].get('lr_gamma', 0.1))
+        print(f"  Learning rate: {trainer.optimizer.param_groups[0]['lr']:.2e} "
+              f"(milestones still ahead: "
+              f"{sorted(trainer.scheduler.milestones) if trainer.scheduler else 'none'}"
+              f"{', reset from config' if config['train'].get('reset_lr_on_resume') else ', from checkpoint'})",
+              flush=True)
         # Fresh random streams for the resumed part, so self-play noise and
         # sampling don't replay the sequences used from iteration 0
         random.seed(seed + 104729 * start_iteration)

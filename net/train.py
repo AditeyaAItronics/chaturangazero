@@ -280,7 +280,40 @@ class Trainer:
         self.history = checkpoint.get('history', self.history)
         if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        # Scheduler step count of the saved run, kept even if this trainer has
+        # no scheduler, so reset_lr() knows which milestones are still ahead
+        self._loaded_sched_step = checkpoint.get('scheduler_state_dict', {}).get('last_epoch')
         return checkpoint
+
+    def reset_lr(self, lr: float, lr_milestones: list[int] = None, lr_gamma: float = 0.1):
+        """
+        Restart the learning-rate schedule after load_checkpoint().
+
+        load_checkpoint() restores the saved optimizer and scheduler state,
+        including the LR and milestones, which overrides whatever the config
+        says. Call this afterwards to continue at `lr` instead.
+
+        Milestones count scheduler steps (trained iterations) from the start
+        of the run, as before, so only milestones later than the current step
+        still apply: resuming at step 1000 with [1100, 1200] decays at 1100
+        and 1200, and [80, 160] means a constant `lr`. Adam's moment
+        estimates are kept.
+        """
+        if self.scheduler is not None:
+            current = self.scheduler.last_epoch
+        else:
+            current = getattr(self, '_loaded_sched_step', None) or 0
+        for group in self.optimizer.param_groups:
+            group['lr'] = lr
+            group['initial_lr'] = lr
+        self.lr = lr
+        future = sorted(m for m in (lr_milestones or []) if m > current)
+        # Always keep a scheduler, even with no milestones left: its saved state
+        # carries the step count and the (future-only) milestones, so a later
+        # plain resume of this run doesn't re-apply the old ones from step 0.
+        # The constructor takes one step itself, so start one step back.
+        self.scheduler = optim.lr_scheduler.MultiStepLR(
+            self.optimizer, milestones=future, gamma=lr_gamma, last_epoch=current - 1)
 
 
 def value_calibration(pred: np.ndarray, target: np.ndarray, n_bins: int = 10) -> dict:
