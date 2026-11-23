@@ -1456,3 +1456,87 @@ body {
 .footer-sep {
   color: var(--text-dim);
 }
+
+
+/* ==========================================================================
+   Model card and readable search output
+   ========================================================================== */
+
+.model-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.model-card-head .panel-title {
+  margin-bottom: 0;
+}
+
+.model-iter-badge {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #23120b;
+  background: linear-gradient(135deg, #e3c07a, #c9a052);
+  padding: 2px 9px;
+  border-radius: 9999px;
+  white-space: nowrap;
+}
+
+.model-card-lede {
+  margin: 0.6rem 0 0.8rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.model-stats {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.model-stats > div {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  padding: 0.3rem 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.model-stats dt {
+  color: var(--text-dim);
+}
+
+.model-stats dd {
+  margin: 0;
+  color: var(--text-main);
+}
+
+.candidate-icon .piece-svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+.candidate-item-left {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.candidate-item-right {
+  position: relative;
+}
+
+.candidate-share {
+  display: block;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -5px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent-cyan) var(--share), rgba(255, 255, 255, 0.08) var(--share));
+}

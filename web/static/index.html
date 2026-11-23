@@ -113,6 +113,16 @@
 
       <!-- Right Column: Matchup Config, AI Thoughts, & History -->
       <aside class="sidebar-section">
+        <!-- Model card: what the AlphaZero player is -->
+        <div class="panel-card model-card" id="model-card">
+          <div class="model-card-head">
+            <h3 class="panel-title">The AlphaZero model</h3>
+            <span class="model-iter-badge" id="model-iter-badge">loading…</span>
+          </div>
+          <p class="model-card-lede">Learned Chaturanga from scratch by playing itself. No human games, no opening book, no hand-written evaluation.</p>
+          <dl class="model-stats" id="model-stats"></dl>
+        </div>
+
         <!-- Rules of this variant -->
         <details class="panel-card rules-card" id="rules-panel" open>
           <summary class="panel-title rules-summary">How this variant works</summary>
@@ -195,12 +205,12 @@
 
         <!-- AI Insights & Value Evaluation Card -->
         <div class="panel-card ai-insights-card" id="ai-insights-panel">
-          <h3 class="panel-title">AI Evaluation & MCTS Analysis</h3>
+          <h3 class="panel-title">What the AI is thinking</h3>
           <div class="eval-bar-container">
             <div class="eval-bar-label">
-              <span>White / Red</span>
-              <span id="eval-value-text">0.00</span>
-              <span>Black / Yellow</span>
+              <span id="eval-label-p1">White</span>
+              <span id="eval-value-text" title="Expected score from the AI's search: win = 100%, draw = 50%">50% – 50%</span>
+              <span id="eval-label-p2">Black</span>
             </div>
             <div class="eval-bar-track">
               <div class="eval-bar-fill" id="eval-bar-fill" style="width: 50%;"></div>
@@ -208,9 +218,9 @@
           </div>
 
           <div class="mcts-candidates" id="mcts-candidates-box">
-            <div class="candidate-header">Top MCTS Branch Visits:</div>
+            <div class="candidate-header" id="candidate-header">Moves the search spent the most time on</div>
             <div class="candidates-list" id="candidates-list">
-              <div class="empty-state">Make a move or trigger AI to inspect search tree.</div>
+              <div class="empty-state">The AI's top candidate moves appear here after it moves.</div>
             </div>
           </div>
         </div>

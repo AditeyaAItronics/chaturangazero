@@ -765,7 +765,9 @@ def test_n15_latest_iteration_comes_from_the_filename(web_client, tmp_path, monk
         torch.save({}, run / f'checkpoint_{i:04d}.pt')
     monkeypatch.setattr(web_app, 'PROJECT_ROOT', str(tmp_path))
     names = {m['id']: m['name'] for m in client.get('/api/models').get_json()['chaturanga']}
-    assert 'Iter 10' in names['az_latest'], names['az_latest']     # old code: "Iter 1"
+    # checkpoint_0010.pt is the 11th iteration (1-based, as in the run's README);
+    # counting files would have said 2
+    assert 'iteration 11' in names['az_latest'], names['az_latest']
 
 
 def test_n14_missing_checkpoint_is_labelled_not_disguised(web_client, tmp_path, monkeypatch):

@@ -8,7 +8,9 @@ Supports:
 - Move validation, legal move highlights, evaluation score bar, MCTS candidate move stats
 """
 
+import json
 import os
+import re
 import sys
 import time
 import threading
@@ -67,6 +69,59 @@ def _checkpoint_path(game: str, model_id: str):
         elif model_id == 'az_phase0':
             path = os.path.join(PROJECT_ROOT, 'runs', 'connect4', 'phase0_passed.pt')
     return path if path and os.path.exists(path) else None
+
+
+PLAY_SIMS = 200          # MCTS simulations per AI move in this app
+_INFO_CACHE = {}
+_UI_PIECE_NAMES = {1: 'Padati', 2: 'Ashva', 3: 'Gaja', 4: 'Ratha', 5: 'Mantri', 6: 'Raja'}
+
+
+def _iteration_of(path: str, ckpt: dict):
+    """1-based iteration a checkpoint was saved after: its stored 'iteration', else
+    the number in a checkpoint_NNNN.pt filename (N15: never a count of files)."""
+    if isinstance(ckpt, dict) and 'iteration' in ckpt:
+        return int(ckpt['iteration']) + 1
+    match = re.search(r'checkpoint_(\d+)\.pt$', os.path.basename(path))
+    return int(match.group(1)) + 1 if match else None
+
+
+def _checkpoint_info(path: str) -> dict:
+    """Iteration, architecture and training size of a checkpoint (cached by mtime)."""
+    key = (path, os.path.getmtime(path))
+    if key not in _INFO_CACHE:
+        ckpt = torch.load(path, map_location='cpu', weights_only=False)
+        state_dict = ckpt.get('model_state_dict', ckpt)
+        config = ckpt.get('net_config') or {}
+        _INFO_CACHE[key] = {
+            'iteration': _iteration_of(path, ckpt),
+            'blocks': config.get('n_blocks'),
+            'channels': config.get('channels'),
+            'parameters': int(sum(v.numel() for k, v in state_dict.items()
+                                  if hasattr(v, 'numel') and 'running_' not in k
+                                  and 'num_batches' not in k)),
+            'train_steps': ckpt.get('total_steps'),
+        }
+    return _INFO_CACHE[key]
+
+
+def _run_summary(run_dir: str) -> dict:
+    """Training totals from the run's metrics.json, if it is there."""
+    path = os.path.join(run_dir, 'metrics.json')
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            metrics = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    arenas = [m['arena'] for m in metrics if m.get('arena')]
+    return {
+        'iterations_trained': len(metrics),
+        'selfplay_games': int(sum(sum(m.get('terminal_stats', {}).values()) for m in metrics)),
+        'arena_matches': len(arenas),
+        'promotions': sum(1 for a in arenas if a.get('promoted')),
+        'hours': round(sum(m.get('elapsed_seconds', 0) for m in metrics) / 3600, 1),
+    }
 
 
 def get_model(game: str, model_id: str):
@@ -134,7 +189,7 @@ def get_model(game: str, model_id: str):
 
 # Game Session State
 class GameSession:
-    def __init__(self, game: str = 'chaturanga', p1_type: str = 'human', p2_type: str = 'az_latest'):
+    def __init__(self, game: str = 'chaturanga', p1_type: str = 'human', p2_type: str = 'az_best'):
         self.game = game
         self.p1_type = p1_type
         self.p2_type = p2_type
@@ -155,7 +210,7 @@ class GameSession:
         return self.p1_type if self.state.side_to_move == 1 else self.p2_type
 
 
-current_session = GameSession('chaturanga', 'human', 'az_latest')
+current_session = GameSession('chaturanga', 'human', 'az_best')
 
 # Flask serves requests on several threads; every route that reads or changes
 # the shared game session holds this lock, so e.g. a double-clicked "AI move"
@@ -293,18 +348,14 @@ def serve_static(path):
 
 @app.route('/api/models', methods=['GET'])
 def list_models():
-    # The iteration is read from the newest checkpoint's filename (N15): counting
-    # files is wrong when checkpoints were pruned or only partly pulled
-    latest_chaturanga_iter = _latest_chaturanga_checkpoint()[0]
-
     models_data = {
         'chaturanga': [
             {'id': 'human', 'name': 'Human Player', 'type': 'human'},
-            {'id': 'az_latest', 'name': f'AlphaZero Latest (Iter {latest_chaturanga_iter if latest_chaturanga_iter is not None else "N/A"})', 'type': 'az'},
-            {'id': 'az_best', 'name': 'AlphaZero Incumbent (best.pt)', 'type': 'az'},
-            {'id': 'baseline_alphabeta', 'name': 'Baseline: Alpha-Beta (3-ply search)', 'type': 'baseline'},
-            {'id': 'baseline_greedy', 'name': 'Baseline: Greedy Material', 'type': 'baseline'},
-            {'id': 'random', 'name': 'Random Moves', 'type': 'random'},
+            {'id': 'az_best', 'name': 'AlphaZero · best model', 'type': 'az'},
+            {'id': 'az_latest', 'name': 'AlphaZero · latest checkpoint', 'type': 'az'},
+            {'id': 'baseline_alphabeta', 'name': 'Baseline · alpha-beta search (3 ply)', 'type': 'baseline'},
+            {'id': 'baseline_greedy', 'name': 'Baseline · greedy material', 'type': 'baseline'},
+            {'id': 'random', 'name': 'Baseline · random moves', 'type': 'random'},
         ],
         'connect4': [
             {'id': 'human', 'name': 'Human Player', 'type': 'human'},
@@ -318,10 +369,31 @@ def list_models():
     for game, entries in models_data.items():
         for entry in entries:
             if entry['type'] == 'az':
-                entry['available'] = _checkpoint_path(game, entry['id']) is not None
+                path = _checkpoint_path(game, entry['id'])
+                entry['available'] = path is not None
                 if not entry['available']:
                     entry['name'] += ' (no checkpoint: plays random moves)'
+                elif game == 'chaturanga':
+                    iteration = _checkpoint_info(path)['iteration']
+                    if iteration is not None:
+                        entry['name'] += f' (iteration {iteration})'
     return jsonify(models_data)
+
+
+@app.route('/api/model_info', methods=['GET'])
+def model_info():
+    """What the model card shows for an AlphaZero player id (default: the best model)."""
+    model_id = request.args.get('id', 'az_best')
+    path = _checkpoint_path('chaturanga', model_id)
+    if path is None:
+        return jsonify({'available': False, 'id': model_id})
+    return jsonify({
+        'available': True,
+        'id': model_id,
+        'play_sims': PLAY_SIMS,
+        **_checkpoint_info(path),
+        **_run_summary(os.path.dirname(path)),
+    })
 
 
 @app.route('/api/state', methods=['GET'])
@@ -336,7 +408,7 @@ def new_game():
     data = request.json or {}
     game = data.get('game', 'chaturanga')
     p1 = data.get('p1_type', 'human')
-    p2 = data.get('p2_type', 'az_latest')
+    p2 = data.get('p2_type', 'az_best')
 
     current_session.game = game
     current_session.p1_type = p1
@@ -410,9 +482,9 @@ def ai_move():
         _, evaluate = get_model(current_session.game, player_type)
         if evaluate is not None:
             # Run MCTS search
-            n_sims = 200 if current_session.game == 'chaturanga' else 200
+            n_sims = PLAY_SIMS
             c_puct = 1.5
-            vc = search(
+            vc, root = search(
                 state=state,
                 evaluate=evaluate,
                 n_sims=n_sims,
@@ -420,14 +492,19 @@ def ai_move():
                 c_puct=c_puct,
                 add_noise=False,
                 adjudicate=False,   # a capped human game is a draw (§2.2)
+                return_root=True,
             )
             legal = state.legal_moves()
             legal_vc = {int(a): int(vc[a]) for a in legal}
             # Pick argmax
             chosen_action = max(legal_vc.keys(), key=lambda a: legal_vc[a])
 
-            # Evaluate current position value
-            _, root_val = evaluate(state)
+            # Position value from the search (the chosen move's mean backed-up value,
+            # side to move's view), turned into White's / Red's view (+1 = first
+            # player winning) so the evaluation bar always reads the same way.
+            edge = root.legal_actions.index(chosen_action)
+            side_value = float(root.W[edge] / root.N[edge]) if root.N[edge] > 0 else 0.0
+            root_val = side_value * state.side_to_move
             total_visits = sum(legal_vc.values())
 
             # Top 3 candidate moves
@@ -438,15 +515,22 @@ def ai_move():
                 if current_session.game == 'chaturanga':
                     f_s, t_s = decode_action(a)
                     cols = 'abcdefgh'
-                    notate = f"{cols[file_of(f_s)]}{rank_of(f_s)+1}->{cols[file_of(t_s)]}{rank_of(t_s)+1}"
+                    capture = '×' if state.piece_at(t_s) != 0 else '→'
+                    notate = (f"{_UI_PIECE_NAMES.get(abs(int(state.piece_at(f_s))), '')} "
+                              f"{cols[file_of(f_s)]}{rank_of(f_s)+1} {capture} "
+                              f"{cols[file_of(t_s)]}{rank_of(t_s)+1}")
                 else:
                     notate = f"Column {a+1}"
-                top_moves.append({'action': a, 'name': notate, 'visits': count, 'pct': round(pct, 1)})
+                entry = {'action': a, 'name': notate, 'visits': count, 'pct': round(pct, 1)}
+                if current_session.game == 'chaturanga':
+                    entry['piece'] = int(state.piece_at(decode_action(a)[0]))
+                top_moves.append(entry)
 
             ai_stats = {
-                'value': round(root_val, 3),
+                'value': round(root_val, 3),       # White's / Red's view
                 'top_moves': top_moves,
                 'sims': n_sims,
+                'total_visits': total_visits,
             }
         else:
             # No checkpoint for this player (N14): play randomly, but say so

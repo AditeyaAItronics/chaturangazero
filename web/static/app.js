@@ -25,6 +25,7 @@ class ArenaApp {
     this.flipped = false;
     this.autoPlay = false;
     this.autoPlayDelay = 600; // ms delay between moves
+    this.playSims = 200;      // replaced by /api/model_info
     // Set when an AI move request fails: automatic AI moves stop (no endless
     // retry loop) until the next human action, new game, undo or Auto-Play toggle.
     // The "Trigger AI Move" button still works.
@@ -74,6 +75,7 @@ class ArenaApp {
     document.querySelectorAll('.key-icon').forEach(el => {
       el.innerHTML = pieceSVG(Number(el.dataset.piece));
     });
+    this.loadModelCard();
     this.p1ThinkingBadge = document.getElementById('p1-thinking-badge');
     this.p2ThinkingBadge = document.getElementById('p2-thinking-badge');
 
@@ -171,7 +173,7 @@ class ArenaApp {
     // Default defaults: P1 Human, P2 best/latest AI
     if (this.currentGame === 'chaturanga') {
       this.selectP1.value = 'human';
-      this.selectP2.value = 'az_latest';
+      this.selectP2.value = 'az_best';
     } else {
       this.selectP1.value = 'human';
       this.selectP2.value = 'az_final';
@@ -215,6 +217,7 @@ class ArenaApp {
     }
 
     this.populateModelSelectors();
+    this.updateEvalLabels();
     await this.startNewGame();
   }
 
@@ -279,7 +282,7 @@ class ArenaApp {
         this.btnAiStep.classList.add('is-thinking');
         this.btnAiStep.innerHTML = `
           <span class="thinking-spinner"></span>
-          <span>Thinking (200 sims)...</span>
+          <span>Thinking (${this.playSims} simulations)…</span>
         `;
       } else {
         this.btnAiStep.classList.remove('is-thinking');
@@ -312,7 +315,7 @@ class ArenaApp {
         const pType = activePlayer === 1 ? this.gameState?.p1_type : this.gameState?.p2_type;
         const pName = this.formatPlayerName(pType || 'az_latest');
         if (this.globalThinkingText) {
-          this.globalThinkingText.textContent = `${sideName} (${pName}) is thinking (200 sims)...`;
+          this.globalThinkingText.textContent = `${sideName} (${pName}) is thinking…`;
         }
         this.globalThinkingIndicator.style.display = 'flex';
       } else {
@@ -329,8 +332,8 @@ class ArenaApp {
             <span class="dot"></span>
             <span class="dot"></span>
           </div>
-          <div class="thinking-title">Evaluating Move Candidates...</div>
-          <div class="thinking-subtitle">Running 200 MCTS rollouts & neural net value inference</div>
+          <div class="thinking-title">Searching…</div>
+          <div class="thinking-subtitle">${this.playSims} Monte Carlo tree search simulations, each guided by the neural network's move priors and position value</div>
         </div>
       `;
     }
@@ -490,16 +493,54 @@ class ArenaApp {
     }
   }
 
+  async loadModelCard() {
+    const badge = document.getElementById('model-iter-badge');
+    const box = document.getElementById('model-stats');
+    try {
+      const res = await fetch('/api/model_info?id=az_best');
+      const info = await res.json();
+      if (!info.available) {
+        badge.textContent = 'no model';
+        box.innerHTML = '<div class="empty-state">No trained checkpoint found in runs/chaturanga.</div>';
+        return;
+      }
+      if (info.play_sims) this.playSims = info.play_sims;
+      badge.textContent = info.iteration ? `iteration ${info.iteration}` : 'best model';
+      const fmt = n => (n === undefined || n === null) ? null : Number(n).toLocaleString();
+      const rows = [
+        ['Network', info.blocks ? `ResNet, ${info.blocks} blocks × ${info.channels} channels` : null],
+        ['Parameters', fmt(info.parameters)],
+        ['Training', info.iterations_trained ? `${fmt(info.iterations_trained)} iterations · ${fmt(info.selfplay_games)} self-play games` : null],
+        ['Gradient steps', fmt(info.train_steps)],
+        ['Promotions', info.arena_matches ? `${info.promotions} of ${info.arena_matches} arena matches won` : null],
+        ['Compute', info.hours ? `${info.hours} h of self-play training` : null],
+        ['Search here', `${info.play_sims} simulations per move`],
+      ].filter(([, v]) => v);
+      box.innerHTML = rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+    } catch (err) {
+      badge.textContent = 'unavailable';
+      console.error('Model info failed:', err);
+    }
+  }
+
+  updateEvalLabels() {
+    const c4 = this.currentGame === 'connect4';
+    document.getElementById('eval-label-p1').textContent = c4 ? 'Red' : 'White';
+    document.getElementById('eval-label-p2').textContent = c4 ? 'Yellow' : 'Black';
+    document.getElementById('model-card').style.display = c4 ? 'none' : '';
+  }
+
   updateAiInsights(stats) {
     if (!stats) return;
 
     // Value evaluation bar
     if (stats.value !== undefined) {
-      const val = stats.value; // -1.0 (Black/P2) to +1.0 (White/P1)
+      // Server sends the search value from White's / Red's view (-1 .. +1);
+      // shown as expected score, where a draw counts as half
+      const val = stats.value;
       const pct = Math.max(0, Math.min(100, ((val + 1) / 2) * 100));
       this.evalBarFill.style.width = `${pct}%`;
-      const sign = val > 0 ? '+' : '';
-      this.evalValueText.textContent = `${sign}${val.toFixed(2)}`;
+      this.evalValueText.textContent = `${Math.round(pct)}% – ${100 - Math.round(pct)}%`;
     }
 
     // Candidate branch moves
@@ -508,14 +549,18 @@ class ArenaApp {
       stats.top_moves.forEach((m, idx) => {
         const item = document.createElement('div');
         item.className = 'candidate-item';
+        const icon = m.piece ? `<span class="candidate-icon">${pieceSVG(m.piece)}</span>` : '';
+        const total = stats.total_visits || stats.sims;
         item.innerHTML = `
           <div class="candidate-item-left">
-            <span class="candidate-rank">#${idx + 1}</span>
+            <span class="candidate-rank">${idx === 0 ? 'Played' : '#' + (idx + 1)}</span>
+            ${icon}
             <span class="candidate-move-name">${m.name}</span>
           </div>
           <div class="candidate-item-right">
-            <span class="candidate-visits-badge">${m.visits} visits</span>
-            <span class="candidate-pct">${m.pct}%</span>
+            <span class="candidate-visits-badge" title="${m.visits} of ${total} search visits">${m.visits}/${total}</span>
+            <span class="candidate-pct">${Math.round(m.pct)}%</span>
+            <span class="candidate-share" style="--share:${m.pct}%"></span>
           </div>
         `;
         this.candidatesList.appendChild(item);
