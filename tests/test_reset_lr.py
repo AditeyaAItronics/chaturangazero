@@ -91,3 +91,31 @@ def test_reset_lr_survives_save_and_load(tmp_path):
     t2 = _resumed(again, lr=2e-3, lr_milestones=[500])
     assert lr_of(t2) == [2e-4, 2e-4]
     assert t2.scheduler.last_epoch == t.scheduler.last_epoch
+
+
+def test_training_loop_resume_with_reset_lr(tmp_path):
+    import os
+    import torch
+    from pipeline.loop import training_loop
+    from tests.test_critical_fixes import _tiny_connect4_config
+
+    def config(iterations, reset):
+        c = _tiny_connect4_config(iterations=iterations, arena_every=99)
+        c['train'].update(lr=1e-3, lr_milestones=[1], lr_gamma=0.1,
+                          reset_lr_on_resume=reset)
+        return c
+
+    def saved_lr(name):
+        ckpt = torch.load(os.path.join(out, name), map_location='cpu', weights_only=False)
+        return ckpt['optimizer_state_dict']['param_groups'][0]['lr']
+
+    out = str(tmp_path / 'run')
+    training_loop(config(2, False), output_dir=out)
+    assert abs(saved_lr('checkpoint_0001.pt') - 1e-4) < 1e-12   # decayed at milestone 1
+
+    resume = os.path.join(out, 'checkpoint_0001.pt')
+    training_loop(config(3, False), output_dir=out, resume_from=resume)
+    assert abs(saved_lr('checkpoint_0002.pt') - 1e-4) < 1e-12   # old behaviour kept
+
+    training_loop(config(3, True), output_dir=out, resume_from=resume)
+    assert abs(saved_lr('checkpoint_0002.pt') - 1e-3) < 1e-12   # reset to train.lr
