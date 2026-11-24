@@ -17,12 +17,13 @@ All other settings are unchanged throughout: 5 × 64 ResNet (514,449 parameters)
 | Match (40 sims, paired openings, no adjudication) | Result | Score | 95% CI | Files |
 |---|---|---|---|---|
 | **Iteration 1,350 vs 870**, 200 games | 15W-169D-16L | **49.8%** | 42.9%–56.6% | `match_1350_vs_870.json` |
+| **Iteration 1,270 vs 870**, 200 games | 7W-172D-21L | **46.5%** | 39.7%–53.4% | `match_1270_vs_870.json` |
 | Iteration 1,350 vs random, 40 games | 40W-0D-0L | 100% | | `baselines_1350.json` |
 | Iteration 1,350 vs greedy material, 40 games | 40W-0D-0L | 100% | | `baselines_1350.json` |
 | **Iteration 1,350 vs 3-ply alpha-beta**, 40 games | 2W-2D-36L | **7.5%** | | `baselines_1350.json` |
 
 **Findings:**
-1. **The continuation did not measurably improve playing strength.** Iteration 1,350 passed the arena gate twice (vs 870: 7W-32D-1L, p = 0.031; vs 1,270: 8W-30D-2L, p = 0.035). But 200 games against 870 give 49.8% (p = 0.63). With 50 arena tests at α = 0.05, about 2.5 false promotions are expected by chance alone, so a per-comparison gate needs a confirmation match or a multiple-testing correction.
+1. **The continuation did not measurably improve playing strength.** The gate promoted 1,270 over 870 (7W-32D-1L, p = 0.031), then 1,350 over 1,270 (8W-30D-2L, p = 0.035). In 200-game matches against 870, **1,270 is significantly weaker** (46.5%; paired p = 0.005 that 870 is better), so its promotion was a false positive. **1,350 is equal to 870** (49.8%, p = 0.63). Overall: 870 ≈ 1,350 > 1,270. With 50 arena tests at α = 0.05, about 2.5 false promotions are expected by chance alone, so a per-comparison gate needs a confirmation match or a multiple-testing correction.
 2. **The agent beats the weak baselines completely but loses heavily to 3-ply alpha-beta** at its training search budget (40 simulations).
 3. **Most games between the two networks are drawn** (169 of 200), so small strength differences need many games to detect.
 
@@ -41,8 +42,9 @@ All other settings are unchanged throughout: 5 × 64 ResNet (514,449 parameters)
 
 ```bash
 python eval/evaluate.py match runs/chaturanga/best.pt runs/chaturanga/checkpoint_0869.pt --games 200 --sims 40
+python eval/evaluate.py match runs/chaturanga/checkpoint_1269.pt runs/chaturanga/checkpoint_0869.pt --games 200 --sims 40
 python eval/evaluate.py baselines runs/chaturanga/best.pt --games 40 --sims 40
 python eval/evaluate.py plots runs/chaturanga
 ```
 
-(`checkpoint_0869.pt` is the earlier `best.pt` of `run-1000/`, iteration 870.)
+(`checkpoint_0869.pt` is the earlier `best.pt` of `run-1000/`, iteration 870; `checkpoint_1269.pt` is iteration 1,270 from the Kaggle run.)

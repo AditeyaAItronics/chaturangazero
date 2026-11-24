@@ -128,12 +128,13 @@ Full tables, plots and the raw evaluation files are in [`results/`](results/READ
 | Match | Result | Score |
 |---|---|---|
 | Iteration 1,350 vs 870, **200 games** | 15W-169D-16L | **49.8%** (95% CI 42.9–56.6%, paired p = 0.63) |
+| Iteration 1,270 vs 870, **200 games** | 7W-172D-21L | **46.5%** (95% CI 39.7–53.4%; p = 0.005 that 870 is better) |
 | Iteration 1,350 vs random | 40W-0D-0L | 100% |
 | Iteration 1,350 vs greedy material | 40W-0D-0L | 100% |
 | Iteration 1,350 vs **3-ply alpha-beta** | 2W-2D-36L | **7.5%** |
 
 **What it shows:**
-- **No measurable gain from the 500-iteration continuation.** The two promotions passed the per-comparison gate (p = 0.031 and 0.035), but a 200-game confirmation match shows equal strength. 50 arena tests at α = 0.05 imply about 2.5 false promotions by chance, so gating needs a confirmation match or a multiple-testing correction (see §9).
+- **No measurable gain from the 500-iteration continuation.** The two promotions passed the per-comparison gate (p = 0.031 and 0.035), but 200-game confirmation matches show **1,270 significantly weaker than 870** (a false promotion) and **1,350 equal to 870**: 870 ≈ 1,350 > 1,270. 50 arena tests at α = 0.05 imply about 2.5 false promotions by chance, so gating needs a confirmation match or a multiple-testing correction (see §9).
 - **Strong against weak opponents, weak against shallow search:** a clean sweep of random and greedy play, but heavy losses to 3-ply alpha-beta at the training search budget.
 - **The value head's jump at iteration 1,000** (sign accuracy about 0.72 → 0.85) coincides with the LR fix, the margin change and an empty replay buffer. The margin change redefines the targets, so this is not by itself evidence of stronger play.
 
@@ -169,7 +170,7 @@ From the code review (`needtofix.md`). These are the bugs that would have silent
 
 9. **The learning rate was stuck at 2e-5 for 840 iterations.** `lr_milestones: [80, 160]` were set for a 200-iteration run, and every resume restored the saved scheduler, whatever the config said. Fixed with `train.reset_lr_on_resume` / `--reset-lr`, with tests through the real training loop.
 10. **The published runs' promotion gate wasn't in the repository.** The paired sign-flip p-value gate used for the Hugging Face runs existed only on the VM. It is now committed with its tests.
-11. **The gate can still be fooled by repetition.** Iterations 1,001–1,500 ran 50 arena tests at α = 0.05, and two challengers passed (1,270 and 1,350). A 200-game match then found 1,350 equal to 870 (49.8%, p = 0.63). About 2.5 false promotions are expected from 50 tests by chance alone. Remedy: confirm every promotion with a longer match, or correct for multiple comparisons, for example sequential testing (SPRT) with a fixed overall error rate.
+11. **The gate can still be fooled by repetition.** Iterations 1,001–1,500 ran 50 arena tests at α = 0.05, and two challengers passed (1,270 and 1,350). 200-game matches then found 1,270 significantly *weaker* than 870 (46.5%, p = 0.005), so the gate replaced a stronger incumbent with a weaker one, and 1,350 equal to 870 (49.8%, p = 0.63). About 2.5 false promotions are expected from 50 tests by chance alone. Remedy: confirm every promotion with a longer match, or correct for multiple comparisons, for example sequential testing (SPRT) with a fixed overall error rate.
 
 ## 10. Future work
 
