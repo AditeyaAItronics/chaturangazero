@@ -117,14 +117,32 @@
 | 6: arena, baselines, ablations | 90 h | | |
 | **Total** | **600 h** | | |
 
-## 7. Results ⏳ *(Student 2 lead)*
+## 7. Results ✅ partly *(Student 2 lead)*
+
+Full tables, plots and the raw evaluation files are in [`results/`](results/README.md).
+
+**The run:** 1,500 iterations. 1–1,000 on an Azure CPU VM, where the LR was stuck at 2e-5 from iteration 160 (the 200-iteration milestones were restored on every resume). 1,001–1,500 on a Kaggle GPU with the LR reset to 2e-4 and an adjudication margin of 2.0. Arena promotions: 870 → 1,270 → 1,350.
+
+**Playing strength** (40 simulations per move, paired random openings, no adjudication):
+
+| Match | Result | Score |
+|---|---|---|
+| Iteration 1,350 vs 870, **200 games** | 15W-169D-16L | **49.8%** (95% CI 42.9–56.6%, paired p = 0.63) |
+| Iteration 1,350 vs random | 40W-0D-0L | 100% |
+| Iteration 1,350 vs greedy material | 40W-0D-0L | 100% |
+| Iteration 1,350 vs **3-ply alpha-beta** | 2W-2D-36L | **7.5%** |
+
+**What it shows:**
+- **No measurable gain from the 500-iteration continuation.** The two promotions passed the per-comparison gate (p = 0.031 and 0.035), but a 200-game confirmation match shows equal strength. 50 arena tests at α = 0.05 imply about 2.5 false promotions by chance, so gating needs a confirmation match or a multiple-testing correction (see §9).
+- **Strong against weak opponents, weak against shallow search:** a clean sweep of random and greedy play, but heavy losses to 3-ply alpha-beta at the training search budget.
+- **The value head's jump at iteration 1,000** (sign accuracy about 0.72 → 0.85) coincides with the LR fix, the margin change and an empty replay buffer. The margin change redefines the targets, so this is not by itself evidence of stronger play.
+
+Still to do:
 
 | Deliverable (Part 8) | Command |
 |---|---|
-| Elo curve across ≥ 30 promoted checkpoints | `python eval/evaluate.py ladder RUN_DIR --games 20 --sims 50` |
-| Win rates vs random, greedy, 3-ply alpha-beta | `python eval/evaluate.py baselines RUN_DIR/best.pt --games 40` |
+| Elo curve across promoted checkpoints | `python eval/evaluate.py ladder RUN_DIR --games 20 --sims 50` |
 | Sims-vs-strength (10/30/100/400 at fixed weights) | `python eval/evaluate.py sims RUN_DIR/best.pt` |
-| Terminal-reason distribution across training | `python eval/evaluate.py plots RUN_DIR` → `terminal_reasons.png` |
 | One annotated sample game | `python eval/evaluate.py game RUN_DIR/best.pt` → `sample_game.md` |
 
 ## 8. Rule-specific findings ⏳ *(all)*
@@ -149,7 +167,9 @@ From the code review (`needtofix.md`). These are the bugs that would have silent
 7. **A tests-that-can't-fail pattern.** The stalemate test's position wasn't actually stalemate, and it printed PASS anyway.
 8. **The replay buffer would have needed ~20 GB** at 1M positions.
 
-⏳ Add anything that goes wrong during the main run, for example cap-rate spikes or plateaus, and what you changed in response.
+9. **The learning rate was stuck at 2e-5 for 840 iterations.** `lr_milestones: [80, 160]` were set for a 200-iteration run, and every resume restored the saved scheduler, whatever the config said. Fixed with `train.reset_lr_on_resume` / `--reset-lr`, with tests through the real training loop.
+10. **The published runs' promotion gate wasn't in the repository.** The paired sign-flip p-value gate used for the Hugging Face runs existed only on the VM. It is now committed with its tests.
+11. **The gate can still be fooled by repetition.** Iterations 1,001–1,500 ran 50 arena tests at α = 0.05, and two challengers passed (1,270 and 1,350). A 200-game match then found 1,350 equal to 870 (49.8%, p = 0.63). About 2.5 false promotions are expected from 50 tests by chance alone. Remedy: confirm every promotion with a longer match, or correct for multiple comparisons, for example sequential testing (SPRT) with a fixed overall error rate.
 
 ## 10. Future work
 
