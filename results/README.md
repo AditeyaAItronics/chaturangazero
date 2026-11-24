@@ -20,11 +20,19 @@ All other settings are unchanged throughout: 5 × 64 ResNet (514,449 parameters)
 | **Iteration 1,270 vs 870**, 200 games | 7W-172D-21L | **46.5%** | 39.7%–53.4% | `match_1270_vs_870.json` |
 | Iteration 1,350 vs random, 40 games | 40W-0D-0L | 100% | | `baselines_1350.json` |
 | Iteration 1,350 vs greedy material, 40 games | 40W-0D-0L | 100% | | `baselines_1350.json` |
-| **Iteration 1,350 vs 3-ply alpha-beta**, 40 games | 2W-2D-36L | **7.5%** | | `baselines_1350.json` |
+| **Iteration 1,350 vs 3-ply alpha-beta**, 40 games | 2W-2D-36L | **7.5%** | 2.6%–19.9% | `baselines_1350.json` |
+
+**More search against alpha-beta** (iteration 1,350; random and greedy stay 40W-0D-0L at every budget; files `baselines_1350_sims200.json`, `baselines_1350_sims800.json`):
+
+| AlphaZero simulations per move | vs 3-ply alpha-beta (40 games) | Score | 95% CI |
+|---|---|---|---|
+| 40 (training budget) | 2W-2D-36L | 7.5% | 2.6–19.9% |
+| 200 (web app default) | 2W-9D-29L | 16.2% | 7.9–30.5% |
+| 800 | 0W-9D-31L | 11.2% | 4.7–24.6% |
 
 **Findings:**
 1. **The continuation did not measurably improve playing strength.** The gate promoted 1,270 over 870 (7W-32D-1L, p = 0.031), then 1,350 over 1,270 (8W-30D-2L, p = 0.035). In 200-game matches against 870, **1,270 is significantly weaker** (46.5%; paired p = 0.005 that 870 is better), so its promotion was a false positive. **1,350 is equal to 870** (49.8%, p = 0.63). Overall: 870 ≈ 1,350 > 1,270. With 50 arena tests at α = 0.05, about 2.5 false promotions are expected by chance alone, so a per-comparison gate needs a confirmation match or a multiple-testing correction.
-2. **The agent beats the weak baselines completely but loses heavily to 3-ply alpha-beta** at its training search budget (40 simulations).
+2. **The agent beats the weak baselines completely but loses heavily to 3-ply alpha-beta, and more search doesn't fix that.** Going from 40 to 200 simulations turns some losses into draws (2 → 9), but the score levels off at about 10–16%; 800 simulations is no better than 200 (the intervals overlap). Search budget isn't the bottleneck: alpha-beta checks every line three plies deep, while the network's judgment in sharp tactical positions is not good enough for selective search to match it.
 3. **Most games between the two networks are drawn** (169 of 200), so small strength differences need many games to detect.
 
 ## Training dynamics (plots in `plots/`)
@@ -43,7 +51,7 @@ All other settings are unchanged throughout: 5 × 64 ResNet (514,449 parameters)
 ```bash
 python eval/evaluate.py match runs/chaturanga/best.pt runs/chaturanga/checkpoint_0869.pt --games 200 --sims 40
 python eval/evaluate.py match runs/chaturanga/checkpoint_1269.pt runs/chaturanga/checkpoint_0869.pt --games 200 --sims 40
-python eval/evaluate.py baselines runs/chaturanga/best.pt --games 40 --sims 40
+python eval/evaluate.py baselines runs/chaturanga/best.pt --games 40 --sims 40      # also --sims 200, --sims 800
 python eval/evaluate.py plots runs/chaturanga
 ```
 

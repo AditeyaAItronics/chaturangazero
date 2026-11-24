@@ -36,7 +36,7 @@ If over the limit, cut in this order: the web demo paragraph, then one figure, t
 
 ## Abstract (about 120 words)
 
-We train an AlphaZero-style agent, from self-play alone, for a historical Chaturanga ruleset with **no check**: the game ends only when a Raja is captured, and a stalemated player wins. The engine is verified against an independent reference engine by perft to depth 6. A 5-block ResNet (514k parameters) with MCTS (40 simulations per move) was trained for **1,500 iterations (48,000 self-play games, 60 GPU/CPU hours)**. A learning-rate bug froze learning for 840 iterations; fixing it revived the value head, but 200-game confirmation matches show the extra 500 iterations brought **no measurable strength gain**, and that one arena promotion was a **false positive** caused by repeated testing. The agent beats random and greedy players 100% of the time but loses to a 3-ply alpha-beta search.
+We train an AlphaZero-style agent, from self-play alone, for a historical Chaturanga ruleset with **no check**: the game ends only when a Raja is captured, and a stalemated player wins. The engine is verified against an independent reference engine by perft to depth 6. A 5-block ResNet (514k parameters) with MCTS (40 simulations per move) was trained for **1,500 iterations (48,000 self-play games, 60 GPU/CPU hours)**. A learning-rate bug froze learning for 840 iterations; fixing it revived the value head, but 200-game confirmation matches show the extra 500 iterations brought **no measurable strength gain**, and that one arena promotion was a **false positive** caused by repeated testing. The agent beats random and greedy players 100% of the time but loses to a 3-ply alpha-beta search, scoring 7–16% even with 20× more search.
 
 ## 1 Introduction (0.4 page)
 
@@ -116,7 +116,15 @@ Total: 48,000 self-play games, 212,309 gradient steps.
 | it. 1,270 vs 870, 200 games | 7W-172D-21L | 46.5% (39.7–53.4%) | **0.005 that 870 is better** |
 | it. 1,350 vs random | 40W-0D-0L | 100% | |
 | it. 1,350 vs greedy material | 40W-0D-0L | 100% | |
-| it. 1,350 vs **3-ply alpha-beta** | 2W-2D-36L | **7.5%** | |
+| it. 1,350 vs **3-ply alpha-beta** | 2W-2D-36L | **7.5%** (2.6–19.9%) | |
+
+**Table 3: search budget vs 3-ply alpha-beta** (iteration 1,350, 40 games each; random and greedy stay 40W-0D-0L at every budget; can be merged into Table 2 to save space)
+
+| AlphaZero simulations per move | vs 3-ply alpha-beta (40 games) | Score | 95% CI |
+|---|---|---|---|
+| 40 (training budget) | 2W-2D-36L | 7.5% | 2.6–19.9% |
+| 200 (web app default) | 2W-9D-29L | 16.2% | 7.9–30.5% |
+| 800 | 0W-9D-31L | 11.2% | 4.7–24.6% |
 
 **4.3 False promotions.**
 - The gate promoted 1,270 over 870 (7W-32D-1L, p = 0.031), then 1,350 over 1,270 (8W-30D-2L, p = 0.035).
@@ -130,11 +138,11 @@ Total: 48,000 self-play games, 212,309 gradient steps.
 
 ## 5 Discussion and future work (0.45 page)
 
-- **Why the agent loses to 3-ply alpha-beta (hypothesis):**
-  - alpha-beta never misses a short tactic, and this variant is decided by tactics;
-  - our MCTS scores unvisited moves as a **draw**, so when the side to move is winning, its other moves look better than an untried capture, and with 40 simulations the capture may never be tried;
-  - this fits the 12–14% missed captures.
-  - **Test:** first-play urgency (`fpu_reduction`), more simulations (the strength-vs-simulations experiment), or always checking Raja captures before searching.
+- **Why the agent loses to 3-ply alpha-beta (measured, Table 3):**
+  - **more search does not close the gap.** 40 → 200 simulations turns some losses into draws (2 → 9), but the score levels off at about 10–16%, and 800 simulations is no better than 200 (overlapping intervals);
+  - so the budget isn't the bottleneck, and the **"untried winning capture" idea can't be the main cause**: at 800 simulations an available capture would almost surely be tried. The unvisited-moves-score-as-draws setting may still cost the 12–14% missed captures at 40 simulations;
+  - **likely cause:** alpha-beta checks *every* line three plies deep, and in a no-check game short tactics decide; the network's judgment in sharp positions isn't good enough for selective search to match exhaustive short-range search;
+  - **next steps:** first-play urgency (`fpu_reduction`), a larger network (the planned 8 × 128), training against tactical positions, or checking Raja captures and threats exhaustively before searching.
 - **Gating under repeated testing:** confirm promotions with a long match, or use sequential testing (SPRT) with a fixed overall error rate.
 - **Shuffling to the move cap:** about 40% of training games hit the cap. Options: a shorter cap (200), more root noise, or a small **draw penalty** (about −0.1 for both sides, training-only), which breaks zero-sum scoring and needs ablations.
 - **Capacity:** 514k parameters and 40 simulations; the planned 8 × 128 network was never trained.
@@ -180,7 +188,7 @@ Used for the demo video.
 ## Still to do before writing the LaTeX
 
 - [ ] Team members confirm the contribution lines and the AI disclosure
-- [ ] Optional experiment: AlphaZero vs 3-ply alpha-beta at 200 and 800 simulations (tests the §5 hypothesis; about 30 minutes)
+- [x] Experiment: AlphaZero vs 3-ply alpha-beta at 200 and 800 simulations (Table 3: 16.2% and 11.2%; no closing of the gap)
 - [ ] Optional experiment: the same with `fpu_reduction` enabled
 - [ ] Pick 1–2 figures (recommended: `value_head.png`; then `cap_and_draws.png`)
 - [ ] Get the course LaTeX template from the Google Drive link
