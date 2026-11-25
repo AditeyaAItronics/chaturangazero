@@ -40,10 +40,11 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu   # or your C
 pip install -r requirements.txt
 ```
 
-**Play against the agent:** download `best.pt` and `metrics.json` from Hugging Face into `runs/chaturanga/`, then:
+**Play against the agent:** the trained models live on Hugging Face, not in this repository. Download them once (into `runs/chaturanga/`, with checksums verified), then start the app:
 
 ```bash
-python web/app.py      # open http://127.0.0.1:5000
+python tools/fetch_models.py   # best model (it. 1,350), 1,500-iteration metrics, it. 870 and 1,500
+python web/app.py              # open http://127.0.0.1:5000
 ```
 
 The web app lets you play either side, watch AI vs AI or old vs new models, set the search strength, see the momentum chart and the AI's reasoning, and analyse a finished game for blunders and brilliant moves. See [`WEB_UI_GUIDE.md`](WEB_UI_GUIDE.md).

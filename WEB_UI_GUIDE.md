@@ -19,13 +19,24 @@ pip install -r requirements.txt                                      # includes 
 
 ### Put the models where the app looks
 
-The app reads checkpoints from **`runs/chaturanga/`** in the repo. `runs/` is git-ignored, so each person copies the files in themselves:
+The app reads checkpoints from **`runs/chaturanga/`** in the repo. `runs/` is git-ignored, so **the models are not in GitHub**: every collaborator downloads them once from Hugging Face. One command does it, and checks every file's checksum:
 
-| File | What it becomes in the app | Where to get it |
+```bash
+python tools/fetch_models.py
+```
+
+It puts these in `runs/chaturanga/` (run it again any time; it only replaces missing or outdated files):
+
+| File | What it becomes in the app | Source on Hugging Face |
 |---|---|---|
-| `best.pt` | **AlphaZero · best model** (the default opponent) | Hugging Face `ansh-k03/chaturangazero-500`, `run-1000/best.pt` (iteration 870), or the newest Kaggle `final/best.pt` |
-| `metrics.json` | Fills the **model card** (iterations, games, promotions, hours) | Same folder as `best.pt` |
-| `checkpoint_NNNN.pt` (any number of them) | One opponent each: **AlphaZero · iteration N+1**; the newest one is listed as **latest checkpoint** | `run-1000/checkpoint_0999.pt` (iteration 1000), `checkpoint_0499.pt` at the repo root (iteration 500), or Kaggle `final/` |
+| `best.pt` | **AlphaZero · best model**, iteration 1,350 (the default opponent) | `run-1500/best.pt` |
+| `metrics.json` | Fills the **model card**: 1,500 iterations, games, promotions, hours | `run-1500/metrics.json` |
+| `checkpoint_1499.pt` | **AlphaZero · latest checkpoint**, iteration 1,500 | `run-1500/checkpoint_1499.pt` |
+| `checkpoint_0869.pt` | **AlphaZero · iteration 870**, the previous best, for old-vs-new games | `run-1000/best.pt` |
+
+Any other `checkpoint_NNNN.pt` you add (for example `checkpoint_0499.pt` at the repo root of Hugging Face, or one from Kaggle `final/` or `run/`) becomes one more opponent, **AlphaZero · iteration N+1**.
+
+> Don't use `run-1000/metrics.json`: it only covers the first 1,000 iterations, so the model card would say "1,000 iterations".
 
 Checkpoint filenames are zero-based, the app is one-based: `checkpoint_0999.pt` is shown as **iteration 1000**.
 
@@ -173,8 +184,9 @@ The thresholds are constants near the top of `web/app.py` (`BLUNDER`, `MISTAKE`,
 
 | Symptom | Fix |
 |---|---|
-| "no checkpoint: plays random moves" | Put `best.pt` in `runs/chaturanga/`, then reload the page. |
-| Model card says "no model" or shows few stats | `best.pt` missing, or `metrics.json` not beside it. |
+| "no checkpoint: plays random moves" | Run `python tools/fetch_models.py`, then reload the page. |
+| Model card says "no model" or shows few stats | `best.pt` missing, or `metrics.json` not beside it: run `python tools/fetch_models.py`. |
+| Model card says **1,000 iterations** or best model **iteration 870** | Old files from `run-1000/`: run `python tools/fetch_models.py`, then restart the app. |
 | An old checkpoint isn't in the list | The name must be `checkpoint_NNNN.pt` in `runs/chaturanga/`; reload the page. |
 | The page doesn't show a new feature | Restart `web/app.py` (backend changes need a restart), then hard-reload (Ctrl + Shift + R). |
 | My game changed by itself | Someone else uses the same server; run your own on another `--port`. |
